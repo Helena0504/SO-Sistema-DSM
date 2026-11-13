@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../sistema/servicios/api/api.h"
+#include "../sistema/api/api.h"
 
 /* Función auxiliar para crear un archivo de configuración temporal válido para las pruebas */
 static void crear_archivo_configuracion(const char *ruta)
