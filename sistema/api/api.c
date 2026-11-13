@@ -1,23 +1,18 @@
 // ============================================================
 // api.c
-// Implementa el api que coordina los servicios
-///////ESTO SOLO ES UN BORRADOR ///////
-///////FALTA LA IMPLEMENTACION DE LOS SERVICIOS ////////
-// ============================================================
-
-// ============================================================
-// api.c
-// Implementa el API que coordina los servicios
+// Implementa el API que coordina los servicios del sistema DSM.
+// Integracion con el modulo de estadisticas.
 // ============================================================
 
 #include "api.h"
-#include "config.h"
-#include "logs.h"
+#include "../global/config.h"
+#include "../global/logs/logs.h"
 
 #include "../global/global.h"
 #include "../servicios/asignacion/asig.h"
 #include "../servicios/nodos/nodos.h"
 #include "../servicios/paginador/pager.h"
+#include "../servicios/estadisticas/stats.h"
 
 #include <pthread.h>
 #include <stdint.h>
@@ -25,13 +20,14 @@
 #include <string.h>
 #include <unistd.h>
 
-// ============================================================
+
+
 // VARIABLES GLOBALES
-// ============================================================
 
 static int initialized = 0;
 
 static dsm_estado_t estado_local = {0};
+
 static config_t configuracion;
 
 static pthread_mutex_t mutex_api = PTHREAD_MUTEX_INITIALIZER;
@@ -48,9 +44,9 @@ static int pager_instalado = 0;
 static pthread_mutex_t locks[MAX_LOCKS];
 static pthread_once_t locks_once = PTHREAD_ONCE_INIT;
 
-// ============================================================
+
+
 // ERRORES
-// ============================================================
 
 static void error_key_create(void)
 {
@@ -74,9 +70,9 @@ static void set_error(status_t e)
     }                        \
 } while (0)
 
-// ============================================================
+
+
 // LOCKS
-// ============================================================
 
 static void locks_inicializar(void)
 {
@@ -85,31 +81,117 @@ static void locks_inicializar(void)
     }
 }
 
-// ============================================================
+
+//CONVERSION DE ERRORES NODOS
+
+static status_t convertir_error_nodos(nodos_resultado_t resultado)
+{
+    switch (resultado) {
+
+        case NODOS_OK:
+            return OK;
+
+        case NODOS_ERROR_PARAMETROS:
+            return ERROR_ARG;
+
+        case NODOS_ERROR_MEMORIA:
+            return ERROR_MEM;
+
+        case NODOS_ERROR_SIN_INICIALIZAR:
+        case NODOS_ERROR_YA_INICIALIZADO:
+        case NODOS_ERROR_DUPLICADO:
+        case NODOS_ERROR_NO_ENCONTRADO:
+        case NODOS_ERROR_CAPACIDAD:
+        case NODOS_ERROR_RELOJ:
+        default:
+            return ERROR_NODE;
+    }
+}
+
+
+
 // CONVERSION DE ERRORES
-// ============================================================
+
 
 static status_t convertir_error_asig(asig_resultado_t resultado)
 {
     switch (resultado) {
+
         case ASIG_OK:
             return OK;
 
         case ASIG_ERROR_PARAMETROS:
             return ERROR_ARG;
 
-        case ASIG_ERROR_SIN_ESPACIO:
+        case ASIG_ERROR_INICIALIZADO:
+            return ERROR_STATE;
+
         case ASIG_ERROR_MEMORIA:
+        case ASIG_ERROR_SIN_ESPACIO:
+        case ASIG_ERROR_SISTEMA:
             return ERROR_MEM;
+
+        case ASIG_ERROR_NO_ENCONTRADO:
+            return ERROR_ARG;
 
         default:
             return ERROR_MEM;
     }
 }
 
-// ============================================================
+
+
+
+// CONVERSION DE ERRORES DE ESTADISTICAS
+
+static status_t convertir_error_stats(stats_resultado_t resultado)
+{
+    switch (resultado) {
+
+        case STATS_OK:
+            return OK;
+
+        case STATS_ERROR_PARAMETROS:
+            return ERROR_ARG;
+
+        case STATS_ERROR_SIN_INICIALIZAR:
+        case STATS_ERROR_YA_INICIALIZADO:
+        case STATS_ERROR_BUFFER:
+        case STATS_ERROR_RELOJ:
+        default:
+            return ERROR_STATS;
+    }
+}
+
+
+// CONVERSION DE ERRORES DEL PAGER
+
+static status_t convertir_error_pager(pager_resultado_t resultado)
+{
+    switch (resultado) {
+
+        case PAGER_OK:
+            return OK;
+
+        case PAGER_ERROR_PARAMETROS:
+        case PAGER_ERROR_NO_ASIGNADA:
+            return ERROR_ARG;
+
+        case PAGER_ERROR_SIN_DATOS:
+        case PAGER_ERROR_COPIAS_REMOTAS:
+            return ERROR_STATE;
+
+        case PAGER_ERROR_SISTEMA:
+        case PAGER_ERROR_YA_INSTALADO:
+        case PAGER_ERROR_NO_INSTALADO:
+        default:
+            return ERROR_PAGER;
+    }
+}
+
+
+
 // INICIALIZACION
-// ============================================================
 
 status_t sistema_init(const char *config_path)
 {
@@ -121,11 +203,13 @@ status_t sistema_init(const char *config_path)
 
     if (initialized) {
         pthread_mutex_unlock(&mutex_api);
+        set_error(OK);
         return OK;
     }
 
     // 1. Leer configuracion
     if (config_cargar(config_path, &configuracion) != 0) {
+
         pthread_mutex_unlock(&mutex_api);
         FALLO(ERROR_CONFIG);
     }
@@ -133,6 +217,7 @@ status_t sistema_init(const char *config_path)
     // 2. Inicializar logs
     if (logs_iniciar(configuracion.logArchivo,
                      configuracion.logLevel) != 0) {
+
         pthread_mutex_unlock(&mutex_api);
         FALLO(ERROR_CONFIG);
     }
@@ -151,9 +236,12 @@ status_t sistema_init(const char *config_path)
         );
 
     if (resultado_asig != ASIG_OK) {
-        logs_escribir(LOG_ERROR, "Error inicializando asignacion");
+
+        logs_escribir(LOG_ERROR,
+                      "Error inicializando asignacion");
 
         logs_cerrar();
+
         pthread_mutex_unlock(&mutex_api);
 
         FALLO(convertir_error_asig(resultado_asig));
@@ -164,13 +252,16 @@ status_t sistema_init(const char *config_path)
         nodos_tabla_inicializar(&estado_local);
 
     if (resultado_nodos != NODOS_OK) {
-        logs_escribir(LOG_ERROR, "Error inicializando nodos");
+
+        logs_escribir(LOG_ERROR,
+                      "Error inicializando nodos");
 
         asig_tabla_liberar(&estado_local);
         logs_cerrar();
 
         pthread_mutex_unlock(&mutex_api);
-        FALLO(ERROR_MEM);
+
+        FALLO(convertir_error_nodos(resultado_nodos));;
     }
 
     // 5. Registrar el nodo local
@@ -195,14 +286,17 @@ status_t sistema_init(const char *config_path)
         nodos_registrar(&estado_local, &nodo_local);
 
     if (resultado_nodos != NODOS_OK) {
-        logs_escribir(LOG_ERROR, "Error registrando nodo local");
+
+        logs_escribir(LOG_ERROR,
+                      "Error registrando nodo local");
 
         nodos_tabla_liberar(&estado_local);
         asig_tabla_liberar(&estado_local);
         logs_cerrar();
 
         pthread_mutex_unlock(&mutex_api);
-        FALLO(ERROR_NODE);
+
+        FALLO(convertir_error_nodos(resultado_nodos));;
     }
 
     // 6. Instalar manejador de fallos de pagina
@@ -210,26 +304,52 @@ status_t sistema_init(const char *config_path)
         pager_fallos_instalar(&estado_local);
 
     if (resultado_pager != PAGER_OK) {
-        logs_escribir(LOG_ERROR, "Error instalando pager");
+
+        logs_escribir(
+            LOG_ERROR,
+            "Error instalando pager. Codigo: %d",
+            resultado_pager
+        );
 
         nodos_tabla_liberar(&estado_local);
         asig_tabla_liberar(&estado_local);
         logs_cerrar();
 
         pthread_mutex_unlock(&mutex_api);
-        FALLO(ERROR_MEM);
+
+        FALLO(convertir_error_pager(resultado_pager));
     }
 
     pager_instalado = 1;
 
-    // 7. Inicializar locks
+    // 7. Inicializar estadisticas
+    stats_resultado_t resultado_stats =
+        stats_inicializar();
+
+    if (resultado_stats != STATS_OK) {
+
+        logs_escribir(LOG_ERROR,
+                      "Error inicializando estadisticas");
+
+        pager_fallos_desinstalar();
+        pager_instalado = 0;
+
+        nodos_tabla_liberar(&estado_local);
+        asig_tabla_liberar(&estado_local);
+        logs_cerrar();
+
+        pthread_mutex_unlock(&mutex_api);
+
+        FALLO(convertir_error_stats(resultado_stats));
+    }
+
+    // 8. Inicializar locks
     pthread_once(&locks_once, locks_inicializar);
 
+    // 9. Marcar sistema como inicializado
     initialized = 1;
 
-    logs_escribir(LOG_INFO,
-                  "Nodo %u iniciado correctamente",
-                  estado_local.nodo_id);
+    logs_escribir(LOG_INFO, "Nodo %u iniciado correctamente", estado_local.nodo_id);
 
     pthread_mutex_unlock(&mutex_api);
 
@@ -238,9 +358,10 @@ status_t sistema_init(const char *config_path)
     return OK;
 }
 
-// ============================================================
+
+
 // RESERVAR MEMORIA
-// ============================================================
+
 
 void *sistema_alloc(size_t size)
 {
@@ -271,48 +392,82 @@ void *sistema_alloc(size_t size)
     pthread_mutex_unlock(&mutex_api);
 
     if (resultado != ASIG_OK) {
+
         status_t error = convertir_error_asig(resultado);
 
         set_error(error);
 
-        logs_escribir(LOG_ERROR,
-                      "Error reservando %zu bytes",
-                      size);
+        logs_escribir(
+            LOG_ERROR,
+            "Error reservando %zu bytes. Codigo ASIG: %d",
+            size,
+            resultado
+        );
 
         return NULL;
     }
 
-    set_error(OK);
+    /* Registrar la solicitud de memoria */
+    stats_resultado_t resultado_stats =
+        stats_registrar(STATS_SOLICITUD_MEMORIA);
 
-    logs_escribir(LOG_INFO,
-                  "Reserva de %zu bytes realizada",
-                  size);
+    if (resultado_stats != STATS_OK) {
+
+        /* Revertir la reserva si falla el registro */
+        pthread_mutex_lock(&mutex_api);
+
+        asig_memoria_liberar(&estado_local, puntero);
+
+        pthread_mutex_unlock(&mutex_api);
+
+        set_error(ERROR_STATS);
+
+        return NULL;
+    }
+
+    logs_escribir(
+        LOG_INFO,
+        "Reserva de %zu bytes realizada correctamente",
+        size
+    );
+
+    set_error(OK);
 
     return puntero;
 }
 
-// ============================================================
+
 // ESPERAR A QUE LOS NODOS ESTEN LISTOS
-// ============================================================
 
 status_t sistema_wait_ready(void)
 {
     REQUIERE_INIT();
 
-    /*
-     * Version 0.0:
-     * Solo se registra y verifica el nodo local.
-     *
-     * La espera distribuida se implementara cuando
-     * red.c gestione JOIN_REQUEST y JOIN_RECIBIDO.
-     */
+    dsm_nodo_t nodo_local;
+
+    nodos_resultado_t resultado =
+        nodos_obtener(
+            &estado_local,
+            estado_local.nodo_id,
+            &nodo_local
+        );
+
+    if (resultado != NODOS_OK) {
+        FALLO(convertir_error_nodos(resultado));
+    }
+
+    if (nodo_local.estado != DSM_NODO_CONECTADO) {
+        FALLO(ERROR_NODE);
+    }
+
+    set_error(OK);
 
     return OK;
 }
 
-// ============================================================
-// SINCRONIZACION
-// ============================================================
+
+
+// SINCRONIZACION GLOBAL
 
 status_t sistema_block_all(void)
 {
@@ -328,9 +483,10 @@ status_t sistema_block_all(void)
     FALLO(ERROR_RED);
 }
 
-// ============================================================
+
+
 // LOCK
-// ============================================================
+
 
 status_t sistema_lock(int lock_id)
 {
@@ -340,10 +496,15 @@ status_t sistema_lock(int lock_id)
         FALLO(ERROR_ARG);
     }
 
-    pthread_mutex_lock(&locks[lock_id]);
+    if (pthread_mutex_lock(&locks[lock_id]) != 0) {
+        FALLO(ERROR_ARG);
+    }
+
+    set_error(OK);
 
     return OK;
 }
+
 
 status_t sistema_unlock(int lock_id)
 {
@@ -357,12 +518,16 @@ status_t sistema_unlock(int lock_id)
         FALLO(ERROR_ARG);
     }
 
+    set_error(OK);
+
     return OK;
 }
 
-// ============================================================
+
+
 // LIBERAR MEMORIA
-// ============================================================
+
+
 
 status_t sistema_free(void *puntero)
 {
@@ -375,26 +540,50 @@ status_t sistema_free(void *puntero)
     pthread_mutex_lock(&mutex_api);
 
     asig_resultado_t resultado =
-        asig_memoria_liberar(&estado_local, puntero);
+        asig_memoria_liberar(
+            &estado_local,
+            puntero
+        );
 
     pthread_mutex_unlock(&mutex_api);
 
     if (resultado != ASIG_OK) {
-        if (resultado == ASIG_ERROR_NO_ENCONTRADO) {
-            FALLO(ERROR_ARG);
-        }
 
-        FALLO(ERROR_MEM);
+        status_t error = convertir_error_asig(resultado);
+
+        set_error(error);
+
+        logs_escribir(
+            LOG_ERROR,
+            "Error liberando memoria. Codigo ASIG: %d",
+            resultado
+        );
+
+        return error;
     }
 
-    logs_escribir(LOG_INFO, "Memoria liberada correctamente");
+    /* Registrar liberacion */
+    stats_resultado_t resultado_stats =
+        stats_registrar(STATS_LIBERACION_MEMORIA);
+
+    if (resultado_stats != STATS_OK) {
+        FALLO(ERROR_STATS);
+    }
+
+    logs_escribir(
+        LOG_INFO,
+        "Memoria liberada correctamente"
+    );
+
+    set_error(OK);
 
     return OK;
 }
 
-// ============================================================
+
+
 // FINALIZAR SISTEMA
-// ============================================================
+
 
 status_t sistema_finalize(void)
 {
@@ -406,21 +595,29 @@ status_t sistema_finalize(void)
 
     // 1. Desinstalar manejador de fallos
     if (pager_instalado) {
-        if (pager_fallos_desinstalar() != PAGER_OK) {
+
+        pager_resultado_t resultado_pager = pager_fallos_desinstalar();
+
+        if (resultado_pager != PAGER_OK) {
+
             pthread_mutex_unlock(&mutex_api);
-            FALLO(ERROR_INTERNAL);
+
+            FALLO(convertir_error_pager(resultado_pager));
         }
 
         pager_instalado = 0;
     }
 
-    // 2. Liberar tabla de nodos
+    // 2. Liberar modulo de estadisticas
+    stats_liberar();
+
+    // 3. Liberar tabla de nodos
     nodos_tabla_liberar(&estado_local);
 
-    // 3. Liberar memoria y asignaciones
+    // 4. Liberar memoria y asignaciones
     asig_tabla_liberar(&estado_local);
 
-    // 4. Marcar sistema como finalizado
+    // 5. Marcar sistema como finalizado
     initialized = 0;
 
     logs_escribir(LOG_INFO, "Sistema DSM finalizado");
@@ -429,12 +626,14 @@ status_t sistema_finalize(void)
 
     pthread_mutex_unlock(&mutex_api);
 
+    set_error(OK);
+
     return OK;
 }
 
-// ============================================================
-// CONSULTAS
-// ============================================================
+
+
+// CONSULTAS de IDENTIFICACION DE NODOS
 
 int sistema_node_id(void)
 {
@@ -443,8 +642,11 @@ int sistema_node_id(void)
         return -1;
     }
 
+    set_error(OK);
+
     return (int)estado_local.nodo_id;
 }
+
 
 int sistema_node_cantidad(void)
 {
@@ -456,16 +658,68 @@ int sistema_node_cantidad(void)
     uint32_t cantidad = 0;
 
     if (nodos_contar_conectados(&estado_local, &cantidad) != NODOS_OK) {
+
         set_error(ERROR_NODE);
+
         return -1;
     }
+
+    set_error(OK);
 
     return (int)cantidad;
 }
 
-// ============================================================
+
+
+status_t sistema_node_info(int node_id, node_info_t *out)
+{
+    REQUIERE_INIT();
+
+    if (out == NULL || node_id < 0 ||
+        (uint32_t)node_id >= DSM_MAX_NODOS) {
+        FALLO(ERROR_ARG);
+    }
+
+    dsm_nodo_t nodo;
+
+    nodos_resultado_t resultado =
+        nodos_obtener(
+            &estado_local,
+            (uint32_t)node_id,
+            &nodo
+        );
+
+    if (resultado != NODOS_OK) {
+        FALLO(convertir_error_nodos(resultado));
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    out->nodo_id = nodo.nodo_id;
+
+    memcpy(out->ip, nodo.ip, sizeof(out->ip));
+    out->ip[sizeof(out->ip) - 1] = '\0';
+
+    out->puerto_pages = nodo.puerto_pages;
+    out->puerto_nodos = nodo.puerto_nodos;
+    out->puerto_heartbeat = nodo.puerto_heartbeat;
+
+    out->memoria_total = nodo.memoria_total;
+    out->memoria_libre = nodo.memoria_libre;
+
+    out->estado = nodo.estado;
+
+    out->ultimo_heartbeat_ms =
+        nodo.ultimo_heartbeat_ms;
+
+    set_error(OK);
+
+    return OK;
+}
+
+
 // ESTADISTICAS
-// ============================================================
+
 
 status_t sistema_stats(int node_id, stats_t *out)
 {
@@ -475,24 +729,105 @@ status_t sistema_stats(int node_id, stats_t *out)
         FALLO(ERROR_ARG);
     }
 
+    // Por ahora solamente se consultan estadisticas locales
     if (node_id != (int)estado_local.nodo_id) {
         FALLO(ERROR_NODE);
     }
 
+    stats_snapshot_t snapshot;
+
+    // Obtener copia consistente de las estadisticas
+    stats_resultado_t resultado = stats_obtener(&snapshot);
+
+    if (resultado != STATS_OK) {
+        FALLO(convertir_error_stats(resultado));
+    }
+
     memset(out, 0, sizeof(*out));
+
+    
+    // Fallos de pagina
+    
+    out->faults_pagina =
+        snapshot.contadores[STATS_FALLO_LECTURA] +
+        snapshot.contadores[STATS_FALLO_ESCRITURA];
+
+    
+    // Transferencias de paginas
+    
+    out->paginas_enviadas =
+        snapshot.contadores[STATS_PAGINA_ENVIADA];
+
+    out->paginas_recibidas =
+        snapshot.contadores[STATS_PAGINA_RECIBIDA];
+
+    
+    // Invalidaciones
+    
+    out->invalidadas =
+        snapshot.contadores[STATS_INVALIDACION_ENVIADA] +
+        snapshot.contadores[STATS_INVALIDACION_RECIBIDA];
+
+    
+    // Operaciones de memoria
+
+    out->solicitudes_memoria =
+        snapshot.contadores[STATS_SOLICITUD_MEMORIA];
+
+    out->liberaciones_memoria =
+        snapshot.contadores[STATS_LIBERACION_MEMORIA];
+
+    
+    // Estadisticas de red
+
+    out->errores_red =
+        snapshot.contadores[STATS_ERROR_RED];
+
+    out->bytes_enviados =
+        snapshot.contadores[STATS_BYTES_ENVIADOS];
+
+    out->bytes_recibidos =
+        snapshot.contadores[STATS_BYTES_RECIBIDOS];
+
+    
+    // Tiempo de actividad
+    
+    out->uptime_ms = snapshot.uptime_ms;
+
+    
+    // Latencia de fallos de pagina
+    
+    out->latencia_muestras = snapshot.latencia_muestras;
+
+    out->latencia_maxima_us = snapshot.latencia_max_us;
+
+    if (snapshot.latencia_muestras > 0) {
+
+        out->latencia_promedio_us =
+            snapshot.latencia_total_us /
+            snapshot.latencia_muestras;
+    }
+
+    
+    // Memoria
 
     out->mem_total = (size_t)estado_local.memoria_total;
 
     out->mem_usada = (size_t)(
-        estado_local.memoria_total - estado_local.memoria_libre
+        estado_local.memoria_total >= estado_local.memoria_libre
+        ? estado_local.memoria_total - estado_local.memoria_libre
+        : 0
     );
+
+    set_error(OK);
 
     return OK;
 }
 
-// ============================================================
+
+
 // IMPRIMIR NODOS
-// ============================================================
+
 
 void sistema_print_nodes(void)
 {
@@ -503,28 +838,59 @@ void sistema_print_nodes(void)
 
     printf("\n========== NODOS DSM ==========\n");
 
-    for (uint32_t i = 0; i < estado_local.nodos_conocidos; i++) {
-        dsm_nodo_t *nodo = &estado_local.tabla_nodos[i];
+    uint32_t encontrados = 0;
 
-        printf("Nodo ID: %u\n", nodo->nodo_id);
-        printf("IP: %s\n", nodo->ip);
+    for (uint32_t id = 0; id < DSM_MAX_NODOS; ++id) {
+
+        node_info_t nodo;
+
+        status_t resultado =
+            sistema_node_info((int)id, &nodo);
+
+        if (resultado != OK) {
+            continue;
+        }
+
+        printf("Nodo ID: %u\n", nodo.nodo_id);
+
+        printf("IP: %s\n", nodo.ip);
+
+        printf("Puerto Pages: %u\n", nodo.puerto_pages);
+
+        printf("Puerto Nodos: %u\n", nodo.puerto_nodos);
+
+        printf("Puerto Heartbeat: %u\n",
+               nodo.puerto_heartbeat);
+
         printf("Estado: %s\n",
-               nodo->estado == DSM_NODO_CONECTADO
-               ? "CONECTADO" : "DESCONECTADO");
+               nodo.estado == DSM_NODO_CONECTADO
+               ? "CONECTADO"
+               : "DESCONECTADO");
 
         printf("Memoria total: %llu\n",
-               (unsigned long long)nodo->memoria_total);
+               (unsigned long long)nodo.memoria_total);
 
-        printf("Memoria libre: %llu\n\n",
-               (unsigned long long)nodo->memoria_libre);
+        printf("Memoria libre: %llu\n",
+               (unsigned long long)nodo.memoria_libre);
+
+        printf("Ultimo heartbeat: %llu ms\n",
+               (unsigned long long)nodo.ultimo_heartbeat_ms);
+
+        printf("--------------------------------\n");
+
+        encontrados++;
     }
 
+    printf("Nodos encontrados: %u\n", encontrados);
+
     printf("===============================\n");
+
+    set_error(OK);
 }
 
-// ============================================================
+
+
 // IMPRIMIR TABLA DE PAGINAS
-// ============================================================
 
 void sistema_print_page_table(int node_id)
 {
@@ -534,13 +900,16 @@ void sistema_print_page_table(int node_id)
     }
 
     if (node_id != (int)estado_local.nodo_id) {
+
         set_error(ERROR_NODE);
+
         return;
     }
 
     printf("\n========== TABLA DE PAGINAS ==========\n");
 
     for (uint32_t i = 0; i < estado_local.numero_paginas; i++) {
+
         dsm_pagina_t *pagina = &estado_local.tabla_paginas[i];
 
         if (!pagina->ocupada) {
@@ -548,6 +917,7 @@ void sistema_print_page_table(int node_id)
         }
 
         printf("Pagina: %u\n", pagina->pagina_id);
+
         printf("Proceso: %llu\n",
                (unsigned long long)pagina->proceso_id);
 
@@ -563,11 +933,130 @@ void sistema_print_page_table(int node_id)
     }
 
     printf("======================================\n");
+
+    set_error(OK);
 }
 
-// ============================================================
+
+
+// CAMBIAR ESTADO MSI DE UNA PAGINA
+
+status_t sistema_page_set_state( uint32_t pagina_id, page_state_t nuevo_estado)
+{
+    REQUIERE_INIT();
+
+    dsm_msi_t estado_pager;
+
+    switch (nuevo_estado) {
+
+        case PAGE_INVALID:
+            estado_pager = DSM_INVALID;
+            break;
+
+        case PAGE_SHARED:
+            estado_pager = DSM_SHARED;
+            break;
+
+        case PAGE_MODIFIED:
+            estado_pager = DSM_MODIFIED;
+            break;
+
+        default:
+            FALLO(ERROR_ARG);
+    }
+
+    pthread_mutex_lock(&mutex_api);
+
+    pager_resultado_t resultado =
+        pager_cambiar_estado(
+            &estado_local,
+            pagina_id,
+            estado_pager
+        );
+
+    pthread_mutex_unlock(&mutex_api);
+
+    if (resultado != PAGER_OK) {
+
+        status_t error = convertir_error_pager(resultado);
+
+        logs_escribir(
+            LOG_ERROR,
+            "Error cambiando estado MSI de pagina %u. Codigo: %d",
+            pagina_id,
+            resultado
+        );
+
+        set_error(error);
+
+        return error;
+    }
+
+    logs_escribir(
+        LOG_INFO,
+        "Estado MSI de pagina %u actualizado",
+        pagina_id
+    );
+
+    set_error(OK);
+
+    return OK;
+}
+
+
+// CONSULTAR ESTADO MSI DE UNA PAGINA
+
+status_t sistema_page_get_state( uint32_t pagina_id, page_state_t *estado)
+{
+    REQUIERE_INIT();
+
+    if (estado == NULL) {
+        FALLO(ERROR_ARG);
+    }
+
+    dsm_msi_t estado_pager;
+
+    pthread_mutex_lock(&mutex_api);
+
+    pager_resultado_t resultado =
+        pager_consultar_estado(
+            &estado_local,
+            pagina_id,
+            &estado_pager
+        );
+
+    pthread_mutex_unlock(&mutex_api);
+
+    if (resultado != PAGER_OK) {
+
+        FALLO(convertir_error_pager(resultado));
+    }
+
+    switch (estado_pager) {
+
+        case DSM_INVALID:
+            *estado = PAGE_INVALID;
+            break;
+
+        case DSM_SHARED:
+            *estado = PAGE_SHARED;
+            break;
+
+        case DSM_MODIFIED:
+            *estado = PAGE_MODIFIED;
+            break;
+
+        default:
+            FALLO(ERROR_PAGER);
+    }
+
+    set_error(OK);
+
+    return OK;
+}
+
+
 // ULTIMO ERROR
-// ============================================================
 
 status_t sistema_last_error(void)
 {

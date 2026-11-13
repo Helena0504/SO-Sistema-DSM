@@ -6,57 +6,139 @@
 
 #ifndef API_H
 #define API_H
+
 #include <stddef.h>
 #include <stdint.h>
 
+#define API_IP_LONGITUD 46u
 
-// Deteccion de errores
+/* Deteccion de errores */
 typedef enum {
     OK = 0,
-    ERROR_CONFIG,  // Error en la configuracion    
-    ERROR_RED,     // Error en la red  
-    ERROR_MEM,     // Error de memoria, se quedo sin memoria
-    ERROR_NODE,    // Se desconecto un nodo 
-    ERROR_NO_INIT,  // no ha sido inicializado   
-    ERROR_ARG       // error de puntero invalido 
+    ERROR_CONFIG,
+    ERROR_RED,
+    ERROR_MEM,
+    ERROR_NODE,
+    ERROR_NO_INIT,
+    ERROR_ARG,
+    ERROR_STATS,
+    ERROR_STATE,
+    ERROR_PAGER
 } status_t;
 
-// Estadisticas preliminares
+
+/* Estados MSI publicos de las paginas */
+typedef enum {
+    PAGE_INVALID = 0,
+    PAGE_SHARED,
+    PAGE_MODIFIED
+} page_state_t;
+
+
+/* Estadisticas publicas del sistema DSM */
 typedef struct {
-    int faults_pagina; //cuantas veces tuvo que ir a buscar la pagina en otro nodo
-    int paginas_enviadas; //cuantas paginas tuvo que enviar a otro nodo
-    int paginas_recibidas; //cuantas paginas tuvo que traer de otro nodo
-    int invalidadas;      //cuantas paginas fueron invalidadas
-    size_t mem_total;      // memoria total del nodo local 
-    size_t mem_usada;   // memoria usada del nodo local
+    uint64_t faults_pagina;
+    uint64_t paginas_enviadas;
+    uint64_t paginas_recibidas;
+    uint64_t invalidadas;
+
+    uint64_t solicitudes_memoria;
+    uint64_t liberaciones_memoria;
+    uint64_t errores_red;
+    uint64_t bytes_enviados;
+    uint64_t bytes_recibidos;
+
+    uint64_t uptime_ms;
+    uint64_t latencia_promedio_us;
+    uint64_t latencia_maxima_us;
+    uint64_t latencia_muestras;
+
+    size_t mem_total;
+    size_t mem_usada;
 } stats_t;
 
 
-// INICIO
-// inicializacion utilizando el archivo de configuracion 
-status_t sistema_init(const char *config_path); //espera a que todos esten conectados y OK
+/* Informacion publica de un nodo */
+typedef struct {
+    uint32_t nodo_id;
+    char ip[API_IP_LONGITUD];
 
-void *sistema_alloc(size_t size); //reserva memoria que se necesita
+    uint16_t puerto_pages;
+    uint16_t puerto_nodos;
+    uint16_t puerto_heartbeat;
 
-status_t sistema_wait_ready(void); //espera a que todos tengan la memoria reservada
+    uint64_t memoria_total;
+    uint64_t memoria_libre;
 
-//EJECUCION
-//----- Sincronizacion -------------
-status_t sistema_block_all(void); //bloquea al sistema completo hasta que puedan seguir
-status_t sistema_lock(int lock_id); //bloqueo mutex para escritura
-status_t sistema_unlock(int lock_id); //desbloqueo mutex para escritura
+    uint8_t estado;
+    uint64_t ultimo_heartbeat_ms;
+} node_info_t;
 
-//FIN
-status_t sistema_free(void *ptr); //libera memoria
-status_t sistema_finalize(void); // termina todo
 
-// CONSULTAS
-int sistema_node_id(void); //consulta id del nodo
-int sistema_node_cantidad(void); //consulta numero de nodo
-status_t sistema_stats(int node_id, stats_t *out);  //consulta de estadisticas
-void sistema_print_nodes(void); //imprime la lista de nodos
-void sistema_print_page_table(int node_id); //imprime la tabla de paginas
-status_t sistema_last_error(void); //imprime el ultimo error
+/* INICIALIZACION */
 
+status_t sistema_init(const char *config_path);
+
+void *sistema_alloc(size_t size);
+
+status_t sistema_wait_ready(void);
+
+
+/* EJECUCION */
+
+status_t sistema_block_all(void);
+
+status_t sistema_lock(int lock_id);
+
+status_t sistema_unlock(int lock_id);
+
+
+/* LIBERACION Y FINALIZACION */
+
+status_t sistema_free(void *ptr);
+
+status_t sistema_finalize(void);
+
+
+/* CONSULTAS DE NODOS */
+
+int sistema_node_id(void);
+
+int sistema_node_cantidad(void);
+
+status_t sistema_node_info(int node_id, node_info_t *out);
+
+void sistema_print_nodes(void);
+
+
+/* ESTADISTICAS */
+
+status_t sistema_stats(int node_id, stats_t *out);
+
+
+/* TABLA DE PAGINAS */
+
+void sistema_print_page_table(int node_id);
+
+
+/* GESTION DEL PAGER */
+
+/* Cambia el estado MSI de una pagina local. */
+status_t sistema_page_set_state(
+    uint32_t pagina_id,
+    page_state_t nuevo_estado
+);
+
+/* Consulta el estado MSI de una pagina local. */
+status_t sistema_page_get_state(
+    uint32_t pagina_id,
+    page_state_t *estado
+);
+
+
+/* ERRORES */
+
+status_t sistema_last_error(void);
 
 #endif
+
