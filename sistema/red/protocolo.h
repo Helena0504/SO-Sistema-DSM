@@ -5,36 +5,41 @@
 // ============================================================
 
 /* Formato
-    - Big-Endian
+    - Big-Endian 
     - Tamanno fijo
     - Encabezado fijo (17 bytes) + mensaje de 'longitud' bytes */
 
-#ifndef PROTOCOLCOLO_H
-#define PROTOCOLCOLO_H
+#ifndef PROTOCOLO_H
+#define PROTOCOLO_H
 
 #include <endian.h>
 #include <stdint.h>
 
 #define PROTOCOL_MAGIC        0x44534D31u   // Esto dice en ascii "DSM1" y es el codigo para identificar mensajes de nuestro sistema
-#define PROTOCOL_MAX_IP       46   //Tamanno max          
-#define PROTOCOL_MAX_TEXTO    64   //Tamanno max    
+#define PROTOCOL_MAX_IP       46   //Tamanno max de una ip escrita como texto
+#define PROTOCOL_MAX_TEXTO    64   //Tamanno max del texto de un error
+
+// Limite de tamanno
+#define PROTOCOL_MAX_MENSAJE  (4u * 1024u * 1024u)
 
 //Todos los nodos
-#define PROTOCOL_DESTINO_TODOS 0xFFFFu  //Mega numero para que mensaje llegue desde el nodo cero hasta ese numero
+#define PROTOCOL_DESTINO_TODOS 0xFFFFu  // Mensaje a todos los nodos del sistema, uno por uno desde 0 hasta FFFF
 
 #define PROTOCOL_PACKED __attribute__((packed)) //esto solo siginifica que ponga todo pegado y no meta espacios raros
 
 // TIPOS
-#define PROTOCOL_TIPO(tipo)  ((unsigned)(tipo) >> 4) //se saca el tipo del primer byte, corriendolo a la derecha
+// El byte 'tipo' guarda la categoria (4 bits altos) y el subtipo (4 bits bajos)
+#define PROTOCOL_TIPO(tipo)     ((unsigned)(tipo) >> 4)     // se saca la categoria corriendo a la derecha
+#define PROTOCOL_SUBTIPO(tipo)  ((unsigned)(tipo) & 0x0Fu)  // se saca el subtipo
 
 typedef enum {
     TIPO_NODOS      = 0,
     TIPO_HEARTBEAT  = 1,
     TIPO_PAGINAS    = 2,
-    DTIPO_MEMORIA    = 3,
-    DTIPO_CONSULTAS  = 4,
-    DTIPO_VALIDACION = 5,
-    DTIPO_ERRORES    = 6
+    TIPO_MEMORIA    = 3,
+    TIPO_CONSULTAS  = 4,
+    TIPO_VALIDACION = 5,
+    TIPO_ERRORES    = 6
 } dsm_categoria_t;
 
 
@@ -55,41 +60,41 @@ typedef enum {
     (9) LOCK_SUELTO       puertoNodos      sync                        RECIBIDO
 */
 
-//Mensaje de tipo 1 (heartbeat) 
+//Mensaje de tipo 1 (heartbeat)
 /*       Subipo              Puerto           Mensaje       Respuesta
-    (1) HEARTBEAT         puertoHeartbeat    heartbeat      HEART_RECIBIDO 
+    (1) HEARTBEAT         puertoHeartbeat    heartbeat      HEART_RECIBIDO
     (2) HEART_RECIBIDO    (respuesta)       heartbeat      -
 */
 
-//Mensaje de tipo 2 (paginas) 
+//Mensaje de tipo 2 (paginas)
 /*       Subipo              Puerto           Mensaje                        Respuesta
     (1) PAGE_REQUEST      puertoPages      page_request                   PAGE_DATA | ERROR
     (2) PAGE_DATA         (respuesta)      page_data + bytes de pagina          -
     (3) INVALIDATE        puertoPages      invalidate                     RECIBIDO
-    (4) PAGE_EVICT        puertoPages      page_data + bytes de pagina    RECIBIDO| ERROR
+    (4) PAGE_EVICT        puertoPages      page_data + bytes de pagina    RECIBIDO | ERROR
  */
 
 //Mensaje de tipo 3 (memoria)
-/*       Subipo              Puerto           Mensaje        Respuesta 
+/*       Subipo              Puerto           Mensaje        Respuesta
     (1) MEM_REQUEST       puertoNodos      memoria         MEM_RESPUESTA
     (2) MEM_RESPUESTA     (respuesta)      memoria         -
     (3) MEM_FREE          puertoNodos      memoria         RECIBIDO
  */
 
 //Mensaje de tipo 4 (consultas)
-/*       Subipo                         Puerto         Mensaje        Respuesta 
-(1,2,3) QUERY_STATS/PAGES/NODES    puertoConsulta      vacio      QUERY_RESPUESTA
+/*       Subipo                         Puerto         Mensaje        Respuesta
+(1,2,3) QUERY_STATS/PAGES/NODES    puertoConsulta      vacio      QUERY_REPLY
     (4) QUERY_REPLY                 (respuesta)        texto            -
 */
 
 //Mensaje de tipo 5 (validacion)
-/*       Subipo              Puerto       Mensaje       Respuesta 
+/*       Subipo              Puerto       Mensaje       Respuesta
     (1) RECIBIDO          (respuesta)      vacio       -
     (2) NRECIBIDO         (respuesta)      error       -
  */
 
 //Mensaje de tipo 6 (error)
-/*       Subipo               Puerto         Mensaje        Respuesta 
+/*       Subipo               Puerto         Mensaje        Respuesta
     (1) ERROR             (respuesta)       error           -
  */
 
@@ -97,6 +102,7 @@ typedef enum {
 
  // Combinacion de tipo+subtipo en un byte
 typedef enum {
+    /* tipo 0: nodos */
     JOIN_REQUEST    = 0x01,
     JOIN_RECIBIDO   = 0x02,
     NODO_ANUNCIO    = 0x03,
@@ -157,18 +163,18 @@ typedef enum {
 } PROTOCOL_error_t;
 
 
-//  ENCABEZADO
+//  ENCABEZADO (17 bytes). red.c lo convierte a big-endian al enviar y al recibir
 typedef struct PROTOCOL_PACKED {
-    uint32_t magic;           
-    uint8_t  tipo;          
-    uint8_t  flags;         
-    uint8_t  reservado;     // 
+    uint32_t magic;         // PROTOCOL_MAGIC
+    uint8_t  tipo;          // categoria + subtipo
+    uint16_t origen;        // id nodo que envia
+    uint16_t destino;       // id nodo que recibe 
     uint32_t id_solicitud;  // identificar solicitudes para enviar respuestas
-    uint32_t longitud;                       
+    uint32_t longitud;      // bytes de mensaje
 } header_t;
 
 
-// MENSAJES 
+// MENSAJES
 // Info de nodo (sirve para diferentes tipos de mensaje)
 typedef struct PROTOCOL_PACKED {
     uint32_t nodo_id;
@@ -180,31 +186,30 @@ typedef struct PROTOCOL_PACKED {
     uint64_t memoria_libre;
 } msg_nodo_info_t;
 
-// JOIN_RECIBIDO: devuelve la lista de nodos, la cantidad es la cantidad de nodos del sistema
+// JOIN_RECIBIDO: 'cantidad' de nodos y luego mensajes de nodos
 typedef struct PROTOCOL_PACKED {
     uint32_t cantidad;
 } msg_node_list_t;
 
-// HEARTBEAT 
+// HEARTBEAT
 typedef struct PROTOCOL_PACKED {
     uint64_t secuencia;
     uint64_t tiempo_ms;      
-    uint64_t memoria_libre;
 } msg_heartbeat_t;
 
 // pedir acceso a pagina
 typedef struct PROTOCOL_PACKED {
     uint32_t pagina;         // id global, no local
-    uint8_t  acceso;                   
+    uint8_t  acceso;
     uint8_t  reservado[3];
 } msg_page_request_t;
 
-// estado de pagina
+// estado de pagina y luego los bytes de la pagina
 typedef struct PROTOCOL_PACKED {
     uint32_t pagina;
     uint8_t  estado_concedido;   // estado de pagina
     uint8_t  reservado[3];
-    uint32_t version;            
+    uint32_t version;
 } msg_page_data_t;
 
 
@@ -230,9 +235,22 @@ typedef struct PROTOCOL_PACKED {
 
 // error
 typedef struct PROTOCOL_PACKED {
-    uint32_t codigo;             
-    uint32_t pagina;             
+    uint32_t codigo;
+    uint32_t pagina;
     char     texto[PROTOCOL_MAX_TEXTO];
 } msg_error_t;
+
+
+// Verifica tamannos maximos de cada parte y mensajes
+_Static_assert(sizeof(header_t)           == 17, "header_t cambio de tamanno");
+_Static_assert(sizeof(msg_nodo_info_t)    == 72, "msg_nodo_info_t cambio de tamanno");
+_Static_assert(sizeof(msg_node_list_t)    == 4,  "msg_node_list_t cambio de tamanno");
+_Static_assert(sizeof(msg_heartbeat_t)    == 24, "msg_heartbeat_t cambio de tamanno");
+_Static_assert(sizeof(msg_page_request_t) == 8,  "msg_page_request_t cambio de tamanno");
+_Static_assert(sizeof(msg_page_data_t)    == 12, "msg_page_data_t cambio de tamanno");
+_Static_assert(sizeof(msg_invalidate_t)   == 4,  "msg_invalidate_t cambio de tamanno");
+_Static_assert(sizeof(msg_memoria_t)      == 20, "msg_memoria_t cambio de tamanno");
+_Static_assert(sizeof(msg_sync_t)         == 4,  "msg_sync_t cambio de tamanno");
+_Static_assert(sizeof(msg_error_t)        == 72, "msg_error_t cambio de tamanno");
 
 #endif
