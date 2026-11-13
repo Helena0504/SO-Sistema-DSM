@@ -1,0 +1,61 @@
+CC = gcc
+CFLAGS = -std=c11 -Wall -Wextra -Werror -pedantic -pthread
+
+ASIG = sistema/servicios/asignacion/asig.c
+NODOS = sistema/servicios/nodos/nodos.c
+PAGER = sistema/servicios/paginador/pager.c
+PAGER_NODOS = sistema/servicios/paginador/pager_nodos.c
+
+PRUEBAS = test_global test_asig test_asig_memoria test_nodos \
+          test_nodos_heartbeat test_pager test_pager_fallos \
+          test_pager_nodos test_integracion
+BINARIOS = $(addprefix build/,$(PRUEBAS))
+
+.PHONY: all test test-integracion demo clean
+
+all: $(BINARIOS) build/prototipo_local
+
+build:
+	mkdir -p build
+
+build/test_global: pruebas/test_global.c | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/test_asig: pruebas/test_asig.c $(ASIG) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/test_asig_memoria: pruebas/test_asig_memoria.c $(ASIG) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/test_nodos: pruebas/test_nodos.c $(NODOS) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/test_nodos_heartbeat: pruebas/test_nodos_heartbeat.c $(NODOS) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/test_pager: pruebas/test_pager.c $(ASIG) $(PAGER) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/test_pager_fallos: pruebas/test_pager_fallos.c $(ASIG) $(PAGER) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/test_pager_nodos: pruebas/test_pager_nodos.c $(ASIG) $(NODOS) $(PAGER) $(PAGER_NODOS) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/test_integracion: pruebas/test_integracion.c $(ASIG) $(NODOS) $(PAGER) $(PAGER_NODOS) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/prototipo_local: sistema/app/demo/prototipo_local.c $(ASIG) $(NODOS) $(PAGER) $(PAGER_NODOS) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+test: $(BINARIOS)
+	@set -e; for prueba in $(BINARIOS); do ./$$prueba; done
+
+test-integracion: build/test_integracion
+	./build/test_integracion
+
+demo: build/prototipo_local
+	./build/prototipo_local
+
+clean:
+	rm -rf build
