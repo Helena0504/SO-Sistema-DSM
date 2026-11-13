@@ -197,6 +197,10 @@ stats_resultado_t stats_serializar(const stats_snapshot_t *snap,
     palabras[k++] = snap->latencia_muestras;
     palabras[k++] = snap->uptime_ms;
 
+    for (size_t i = 0; i < STATS_SERIAL_PALABRAS; ++i) {
+        palabras[i] = htobe64(palabras[i]);
+    }
+
     memcpy(buffer, palabras, STATS_SERIAL_BYTES);
     return STATS_OK;
 }
@@ -215,6 +219,10 @@ stats_resultado_t stats_deserializar(const void *buffer, size_t longitud, stats_
 
     uint64_t palabras[STATS_SERIAL_PALABRAS];
     memcpy(palabras, buffer, STATS_SERIAL_BYTES);
+
+    for (size_t i = 0; i < STATS_SERIAL_PALABRAS; ++i) {
+        palabras[i] = be64toh(palabras[i]);
+    }
 
     size_t k = 0;
     for (int i = 0; i < STATS_EVENTO_CANTIDAD; ++i) {
