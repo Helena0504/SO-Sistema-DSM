@@ -245,7 +245,7 @@ typedef struct PROTOCOL_PACKED {
 _Static_assert(sizeof(header_t)           == 17, "header_t cambio de tamanno");
 _Static_assert(sizeof(msg_nodo_info_t)    == 72, "msg_nodo_info_t cambio de tamanno");
 _Static_assert(sizeof(msg_node_list_t)    == 4,  "msg_node_list_t cambio de tamanno");
-_Static_assert(sizeof(msg_heartbeat_t)    == 24, "msg_heartbeat_t cambio de tamanno");
+_Static_assert(sizeof(msg_heartbeat_t)    == 16, "msg_heartbeat_t cambio de tamanno");
 _Static_assert(sizeof(msg_page_request_t) == 8,  "msg_page_request_t cambio de tamanno");
 _Static_assert(sizeof(msg_page_data_t)    == 12, "msg_page_data_t cambio de tamanno");
 _Static_assert(sizeof(msg_invalidate_t)   == 4,  "msg_invalidate_t cambio de tamanno");

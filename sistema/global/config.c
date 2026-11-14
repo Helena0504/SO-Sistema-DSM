@@ -298,11 +298,11 @@ int config_cargar(const char *ruta, config_t *config)
     if (config->nodo_id >= 64 ||
         config->memoriaNodo % config->pageSize != 0 ||
         config->muertoH < config->pausaH ||
-        strcmp(config->logLevel, "TRACE") != 0 &&
-        strcmp(config->logLevel, "DEBUG") != 0 &&
-        strcmp(config->logLevel, "INFO") != 0 &&
-        strcmp(config->logLevel, "WARNING") != 0 &&
-        strcmp(config->logLevel, "ERROR") != 0) {
+        (strcmp(config->logLevel, "TRACE") != 0 &&
+         strcmp(config->logLevel, "DEBUG") != 0 &&
+         strcmp(config->logLevel, "INFO") != 0 &&
+         strcmp(config->logLevel, "WARNING") != 0 &&
+         strcmp(config->logLevel, "ERROR") != 0)) {
         return -1;
     }
 

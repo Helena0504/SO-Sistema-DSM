@@ -1,2 +1,5 @@
 # Binarios locales generados por make
 /build/
+
+# Archivos de logs generados durante las pruebas
+*.log

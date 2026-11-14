@@ -173,12 +173,12 @@ red_resultado_t red_enviar_mensaje(int fd, uint8_t tipo, uint16_t origen, uint16
 
     //encabezado: big endian
     header_t head;
-    head.magic        = PROTOCOL_MAGIC;
+    head.magic        = htobe32(PROTOCOL_MAGIC);
     head.tipo         = tipo; 
-    head.origen       = origen;
-    head.destino      = destino;
-    head.id_solicitud = id_solicitud;
-    head.longitud     = longitud;
+    head.origen       = htobe16(origen);
+    head.destino      = htobe16(destino);
+    head.id_solicitud = htobe32(id_solicitud);
+    head.longitud     = htobe32(longitud);
 
     //MSG_MORE avisa que viene el mensaje justo despues
     red_resultado_t e = enviar_todo(fd, &head, sizeof(head), longitud > 0 ? MSG_MORE : 0);
@@ -246,9 +246,9 @@ red_resultado_t red_recibir_mensaje(int fd, red_mensaje_t *salida, int timeout_i
 
     //mensaje que sale completo, el encabezado ya en orden
     salida->tipo         = head.tipo;
-    salida->origen       = head.origen;
-    salida->destino      = head.destino;
-    salida->id_solicitud = head.id_solicitud;
+    salida->origen       = be16toh(head.origen);
+    salida->destino      = be16toh(head.destino);
+    salida->id_solicitud = be32toh(head.id_solicitud);
     salida->longitud     = longitud;
     salida->mensaje      = mensaje;
     return RED_OK;

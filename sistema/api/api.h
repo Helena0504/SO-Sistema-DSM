@@ -84,6 +84,15 @@ void *sistema_alloc(size_t size);
 status_t sistema_wait_ready(void);
 
 
+/* RED: se activa explicitamente despues de sistema_init. */
+status_t sistema_red_iniciar(void);
+status_t sistema_red_unirse(const char *ip, uint16_t puerto_nodos);
+status_t sistema_red_heartbeat(uint32_t nodo_id);
+status_t sistema_red_pedir_pagina(uint32_t nodo_id, uint32_t pagina_id);
+status_t sistema_red_invalidar_copia(uint32_t nodo_id, uint32_t pagina_id);
+status_t sistema_red_verificar_nodos(uint32_t *nuevos_caidos);
+status_t sistema_red_detener(void);
+
 /* EJECUCION */
 
 status_t sistema_block_all(void);

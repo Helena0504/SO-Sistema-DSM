@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/mman.h>
 
 /* El buffer se prepara fuera de red.c para no mezclar TCP con memoria. */
 static void *direccion_para_envio(const dsm_estado_t *estado,
@@ -130,5 +131,53 @@ pager_resultado_t pager_confirmar_invalidacion(dsm_estado_t *estado,
     }
     /* La escritura exclusiva se solicita luego con pager_cambiar_estado. */
     pagina->nodos_con_copia &= ~mascara;
+    return PAGER_OK;
+}
+
+/* La memoria ya fue reservada con mmap por asig; no se crea otra region. */
+pager_resultado_t pager_instalar_copia(dsm_estado_t *estado,
+                                      uint32_t pagina_id,
+                                      uint32_t nodo_origen,
+                                      const void *contenido,
+                                      size_t longitud,
+                                      uint32_t version)
+{
+    if (estado == NULL || contenido == NULL ||
+        estado->tabla_paginas == NULL ||
+        estado->tabla_asignaciones == NULL ||
+        pagina_id >= estado->numero_paginas ||
+        longitud != estado->tamano_pagina) {
+        return PAGER_ERROR_PARAMETROS;
+    }
+
+    dsm_pagina_t *pagina = &estado->tabla_paginas[pagina_id];
+    if (!pagina->ocupada || pagina->estado_msi != DSM_INVALID) {
+        return PAGER_ERROR_NO_ASIGNADA;
+    }
+    pager_resultado_t r = comprobar_destino(estado, nodo_origen);
+    if (r != PAGER_OK) {
+        return r;
+    }
+    void *destino = direccion_para_envio(estado, pagina_id);
+    if (destino == NULL) {
+        return PAGER_ERROR_NO_ASIGNADA;
+    }
+
+    /* Solo se habilita escritura durante la copia. */
+    if (mprotect(destino, longitud, PROT_READ | PROT_WRITE) != 0) {
+        return PAGER_ERROR_SISTEMA;
+    }
+    memcpy(destino, contenido, longitud);
+    if (mprotect(destino, longitud, PROT_READ) != 0) {
+        mprotect(destino, longitud, PROT_NONE);
+        return PAGER_ERROR_SISTEMA;
+    }
+
+    pagina->estado_msi = DSM_SHARED;
+    pagina->nodo_origen = nodo_origen;
+    pagina->nodo_exclusivo = DSM_NODO_SIN_EXCLUSIVIDAD;
+    pagina->nodos_con_copia = (UINT64_C(1) << estado->nodo_id) |
+                              (UINT64_C(1) << nodo_origen);
+    pagina->version = version;
     return PAGER_OK;
 }

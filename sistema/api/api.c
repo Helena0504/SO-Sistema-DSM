@@ -13,6 +13,7 @@
 #include "../servicios/nodos/nodos.h"
 #include "../servicios/paginador/pager.h"
 #include "../servicios/estadisticas/stats.h"
+#include "../red/puente.h"
 
 #include <pthread.h>
 #include <stdint.h>
@@ -37,6 +38,8 @@ static pthread_key_t error_key;
 static pthread_once_t error_once = PTHREAD_ONCE_INIT;
 
 static int pager_instalado = 0;
+static puente_t puente_local = {0};
+static int red_activa = 0;
 
 // Locks locales provisionales
 #define MAX_LOCKS 256
@@ -59,9 +62,10 @@ static void set_error(status_t e)
     pthread_setspecific(error_key, (void *)(intptr_t)e);
 }
 
-#define FALLO(e) do { \
-    set_error(e);     \
-    return (e);       \
+#define FALLO(e) do {            \
+    status_t _dsm_error_tmp = (e); \
+    set_error(_dsm_error_tmp);      \
+    return _dsm_error_tmp;         \
 } while (0)
 
 #define REQUIERE_INIT() do { \
@@ -190,6 +194,18 @@ static status_t convertir_error_pager(pager_resultado_t resultado)
 }
 
 
+
+static status_t convertir_error_puente(puente_resultado_t resultado)
+{
+    switch (resultado) {
+        case PUENTE_OK: return OK;
+        case PUENTE_ERROR_PARAMETROS: return ERROR_ARG;
+        case PUENTE_ERROR_NODO: return ERROR_NODE;
+        case PUENTE_ERROR_PAGINA: return ERROR_PAGER;
+        case PUENTE_ERROR_INICIADO: return ERROR_STATE;
+        default: return ERROR_RED;
+    }
+}
 
 // INICIALIZACION
 
@@ -359,6 +375,82 @@ status_t sistema_init(const char *config_path)
 }
 
 
+
+/* La red se activa por separado para conservar el modo local de prueba. */
+status_t sistema_red_iniciar(void)
+{
+    REQUIERE_INIT();
+    pthread_mutex_lock(&mutex_api);
+    puente_resultado_t r = puente_iniciar(&puente_local, &estado_local,
+                                         &configuracion);
+    if (r == PUENTE_OK) {
+        red_activa = 1;
+    }
+    pthread_mutex_unlock(&mutex_api);
+    FALLO(convertir_error_puente(r));
+}
+
+status_t sistema_red_unirse(const char *ip, uint16_t puerto_nodos)
+{
+    REQUIERE_INIT();
+    if (!red_activa) {
+        FALLO(ERROR_RED);
+    }
+    FALLO(convertir_error_puente(
+        puente_unirse(&puente_local, ip, puerto_nodos)));
+}
+
+status_t sistema_red_heartbeat(uint32_t nodo_id)
+{
+    REQUIERE_INIT();
+    if (!red_activa) {
+        FALLO(ERROR_RED);
+    }
+    FALLO(convertir_error_puente(
+        puente_enviar_heartbeat(&puente_local, nodo_id)));
+}
+
+status_t sistema_red_pedir_pagina(uint32_t nodo_id, uint32_t pagina_id)
+{
+    REQUIERE_INIT();
+    if (!red_activa) {
+        FALLO(ERROR_RED);
+    }
+    FALLO(convertir_error_puente(
+        puente_pedir_pagina(&puente_local, nodo_id, pagina_id)));
+}
+
+status_t sistema_red_invalidar_copia(uint32_t nodo_id, uint32_t pagina_id)
+{
+    REQUIERE_INIT();
+    if (!red_activa) {
+        FALLO(ERROR_RED);
+    }
+    FALLO(convertir_error_puente(
+        puente_invalidar_copia(&puente_local, nodo_id, pagina_id)));
+}
+
+status_t sistema_red_verificar_nodos(uint32_t *nuevos_caidos)
+{
+    REQUIERE_INIT();
+    if (!red_activa) {
+        FALLO(ERROR_RED);
+    }
+    FALLO(convertir_error_puente(
+        puente_verificar_heartbeat(&puente_local, nuevos_caidos)));
+}
+
+status_t sistema_red_detener(void)
+{
+    REQUIERE_INIT();
+    pthread_mutex_lock(&mutex_api);
+    if (red_activa) {
+        puente_detener(&puente_local);
+        red_activa = 0;
+    }
+    pthread_mutex_unlock(&mutex_api);
+    FALLO(OK);
+}
 
 // RESERVAR MEMORIA
 
@@ -593,6 +685,12 @@ status_t sistema_finalize(void)
 
     logs_escribir(LOG_INFO, "Finalizando nodo DSM");
 
+    /* Detener los servidores antes de liberar las tablas. */
+    if (red_activa) {
+        puente_detener(&puente_local);
+        red_activa = 0;
+    }
+
     // 1. Desinstalar manejador de fallos
     if (pager_instalado) {
 
@@ -676,7 +774,7 @@ status_t sistema_node_info(int node_id, node_info_t *out)
     REQUIERE_INIT();
 
     if (out == NULL || node_id < 0 ||
-        (uint32_t)node_id >= DSM_MAX_NODOS) {
+        (uint32_t)(uint32_t)node_id >= DSM_MAX_NODOS) {
         FALLO(ERROR_ARG);
     }
 
@@ -729,18 +827,33 @@ status_t sistema_stats(int node_id, stats_t *out)
         FALLO(ERROR_ARG);
     }
 
-    // Por ahora solamente se consultan estadisticas locales
-    if (node_id != (int)estado_local.nodo_id) {
-        FALLO(ERROR_NODE);
-    }
-
     stats_snapshot_t snapshot;
+    uint64_t total = estado_local.memoria_total;
+    uint64_t libre = estado_local.memoria_libre;
 
-    // Obtener copia consistente de las estadisticas
-    stats_resultado_t resultado = stats_obtener(&snapshot);
-
-    if (resultado != STATS_OK) {
-        FALLO(convertir_error_stats(resultado));
+    if (node_id == (int)estado_local.nodo_id) {
+        stats_resultado_t resultado = stats_obtener(&snapshot);
+        if (resultado != STATS_OK) {
+            FALLO(convertir_error_stats(resultado));
+        }
+    } else {
+        if (!red_activa || node_id < 0 || (uint32_t)node_id >= DSM_MAX_NODOS) {
+            FALLO(ERROR_NODE);
+        }
+        dsm_nodo_t remoto;
+        if (nodos_obtener(&estado_local, (uint32_t)node_id, &remoto) != NODOS_OK ||
+            remoto.estado != DSM_NODO_CONECTADO) {
+            FALLO(ERROR_NODE);
+        }
+        /* En equipos distintos todos utilizan el puertoConsulta configurado.
+           Para dos nodos en localhost con puertos distintos, usar puente_consultar_stats. */
+        puente_resultado_t r = puente_consultar_stats(&puente_local,
+            (uint32_t)node_id, configuracion.puertoConsulta, &snapshot);
+        if (r != PUENTE_OK) {
+            FALLO(convertir_error_puente(r));
+        }
+        total = remoto.memoria_total;
+        libre = remoto.memoria_libre;
     }
 
     memset(out, 0, sizeof(*out));
@@ -811,13 +924,9 @@ status_t sistema_stats(int node_id, stats_t *out)
     
     // Memoria
 
-    out->mem_total = (size_t)estado_local.memoria_total;
+    out->mem_total = (size_t)total;
 
-    out->mem_usada = (size_t)(
-        estado_local.memoria_total >= estado_local.memoria_libre
-        ? estado_local.memoria_total - estado_local.memoria_libre
-        : 0
-    );
+    out->mem_usada = (size_t)(total >= libre ? total - libre : 0);
 
     set_error(OK);
 

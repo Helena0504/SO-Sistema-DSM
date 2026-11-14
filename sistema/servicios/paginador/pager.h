@@ -47,6 +47,15 @@ pager_resultado_t pager_confirmar_invalidacion(dsm_estado_t *estado,
                                               uint32_t pagina_id,
                                               uint32_t nodo_destino);
 
+/* Instala una pagina recibida por red sobre una reserva local INVALID.
+   La pagina queda SHARED para que no se escriba sin invalidar copias. */
+pager_resultado_t pager_instalar_copia(dsm_estado_t *estado,
+                                      uint32_t pagina_id,
+                                      uint32_t nodo_origen,
+                                      const void *contenido,
+                                      size_t longitud,
+                                      uint32_t version);
+
 /* Instala SIGSEGV para una sola instancia DSM en este proceso.
    Por ahora solo recupera escrituras en paginas SHARED sin copias remotas. */
 pager_resultado_t pager_fallos_instalar(dsm_estado_t *estado);
