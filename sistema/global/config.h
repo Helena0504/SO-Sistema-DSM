@@ -11,9 +11,19 @@
 #include <stdint.h>
 
 #define CONFIG_MAX_IP 46
+#define CONFIG_MAX_NODOS 64
 #define CONFIG_MAX_ARCHIVO 256
 
 typedef struct {
+    uint32_t id;
+    char ip[CONFIG_MAX_IP];
+} config_nodo_t;
+
+typedef struct {
+    /* Lista comun de nodos para todas las maquinas */
+    config_nodo_t nodos[CONFIG_MAX_NODOS];
+    uint32_t cantidad_nodos;
+
     /* Nodo */
     uint32_t nodo_id;
     char ip_local[CONFIG_MAX_IP];

@@ -6,6 +6,9 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 
 static char *limpiar(char *texto)
 {
@@ -51,6 +54,101 @@ static int leer_booleano(const char *valor, int *salida)
     }
 
     return -1;
+}
+
+/* Lee entradas id:IP separadas por comas. Rechaza IDs e IPs repetidos. */
+static int leer_lista_nodos(char *valor, config_t *config)
+{
+    if (config->cantidad_nodos != 0) {
+        return -1;
+    }
+    char *cursor = valor;
+    while (*cursor != '\0') {
+        char *coma = strchr(cursor, ',');
+        if (coma != NULL) {
+            *coma = '\0';
+        }
+        char *entrada = limpiar(cursor);
+        char *dos_puntos = strchr(entrada, ':');
+        if (dos_puntos == NULL || config->cantidad_nodos >= CONFIG_MAX_NODOS) {
+            return -1;
+        }
+        *dos_puntos = '\0';
+        uint64_t id;
+        char *ip = limpiar(dos_puntos + 1);
+        struct in_addr direccion;
+        if (leer_numero(limpiar(entrada), &id) != 0 ||
+            id >= CONFIG_MAX_NODOS || strlen(ip) >= CONFIG_MAX_IP ||
+            inet_pton(AF_INET, ip, &direccion) != 1) {
+            return -1;
+        }
+        for (uint32_t i = 0; i < config->cantidad_nodos; i++) {
+            if (config->nodos[i].id == id ||
+                strcmp(config->nodos[i].ip, ip) == 0) {
+                return -1;
+            }
+        }
+        config_nodo_t *nodo = &config->nodos[config->cantidad_nodos++];
+        nodo->id = (uint32_t)id;
+        strcpy(nodo->ip, ip);
+        if (coma == NULL) {
+            break;
+        }
+        cursor = coma + 1;
+        if (*cursor == '\0') {
+            return -1;
+        }
+    }
+    return config->cantidad_nodos > 0 ? 0 : -1;
+}
+
+/* Busca una IP configurada en las interfaces de esta maquina. */
+static int identificar_nodo(config_t *config)
+{
+    const char *id_prueba = getenv("DSM_NODO_ID");
+    if (id_prueba != NULL && *id_prueba != '\0') {
+        /* Permite ejecutar varias instancias en una sola PC durante pruebas. */
+        uint64_t id;
+        if (leer_numero(id_prueba, &id) != 0 || id >= CONFIG_MAX_NODOS) {
+            return -1;
+        }
+        for (uint32_t i = 0; i < config->cantidad_nodos; i++) {
+            if (config->nodos[i].id == id) {
+                config->nodo_id = (uint32_t)id;
+                strcpy(config->ip_local, config->nodos[i].ip);
+                return 0;
+            }
+        }
+        return -1;
+    }
+
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0) {
+        return -1;
+    }
+    int coincidencias = 0;
+    for (struct ifaddrs *it = interfaces; it != NULL; it = it->ifa_next) {
+        if (it->ifa_addr == NULL || it->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+        char ip[INET_ADDRSTRLEN];
+        struct sockaddr_in *sa = (struct sockaddr_in *)it->ifa_addr;
+        if (inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip)) == NULL) {
+            continue;
+        }
+        for (uint32_t i = 0; i < config->cantidad_nodos; i++) {
+            if (strcmp(ip, config->nodos[i].ip) == 0) {
+                if (coincidencias == 0) {
+                    config->nodo_id = config->nodos[i].id;
+                    strcpy(config->ip_local, config->nodos[i].ip);
+                }
+                coincidencias++;
+            }
+        }
+    }
+    freeifaddrs(interfaces);
+    /* Una maquina que tenga dos IPs listadas no puede decidir su ID sola. */
+    return coincidencias == 1 ? 0 : -1;
 }
 
 void config_default(config_t *config)
@@ -101,7 +199,7 @@ int config_cargar(const char *ruta, config_t *config)
 
     config_default(config);
 
-    char linea[512];
+    char linea[8192];
     unsigned numero_linea = 0;
     int resultado = 0;
 
@@ -274,12 +372,11 @@ int config_cargar(const char *ruta, config_t *config)
             }
         }
 
-        /*
-         * Las claves que todavia no utiliza esta version
-         * se ignoran para permitir ampliar el archivo.
-         */
         else if (strcmp(clave, "nodos") == 0) {
-            continue;
+            if (leer_lista_nodos(valor, config) != 0) {
+                resultado = -1;
+                break;
+            }
         }
     }
 
@@ -292,6 +389,12 @@ int config_cargar(const char *ruta, config_t *config)
     if (resultado != 0) {
         fprintf(stderr, "Error en sistema.conf, linea %u\n",
                 numero_linea);
+        return -1;
+    }
+
+    if (config->cantidad_nodos != 0 && identificar_nodo(config) != 0) {
+        fprintf(stderr, "Ninguna IP de nodos= identifica esta maquina. "
+                        "Verifique ip -4 addr y sistema.conf\n");
         return -1;
     }
 

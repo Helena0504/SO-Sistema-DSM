@@ -57,12 +57,22 @@ static int registrar_remoto(puente_t *p, const dsm_nodo_t *nodo)
 {
     dsm_nodo_t existente;
     if (nodos_obtener(p->estado, nodo->nodo_id, &existente) == NODOS_OK) {
-        /* No se cambia la identidad del nodo silenciosamente. */
-        return strcmp(existente.ip, nodo->ip) == 0 &&
-               existente.puerto_pages == nodo->puerto_pages &&
-               existente.puerto_nodos == nodo->puerto_nodos &&
-               existente.puerto_heartbeat == nodo->puerto_heartbeat &&
-               existente.estado == DSM_NODO_CONECTADO ? 0 : -1;
+        /* Solo se acepta reconectar al mismo nodo, con la misma IP y puertos. */
+        if (strcmp(existente.ip, nodo->ip) != 0 ||
+            existente.puerto_pages != nodo->puerto_pages ||
+            existente.puerto_nodos != nodo->puerto_nodos ||
+            existente.puerto_heartbeat != nodo->puerto_heartbeat) {
+            return -1;
+        }
+        if (existente.estado == DSM_NODO_DESCONECTADO &&
+            nodos_cambiar_estado(p->estado, nodo->nodo_id,
+                                DSM_NODO_CONECTADO) != NODOS_OK) {
+            return -1;
+        }
+        uint64_t ahora;
+        return nodos_tiempo_ms(&ahora) == NODOS_OK &&
+               nodos_heartbeat_recibido(p->estado, nodo->nodo_id,
+                                        ahora) == NODOS_OK ? 0 : -1;
     }
     return nodos_registrar(p->estado, nodo) == NODOS_OK ? 0 : -1;
 }
@@ -405,6 +415,10 @@ puente_resultado_t puente_enviar_heartbeat(puente_t *p, uint32_t destino)
     red_mensaje_liberar(&respuesta);
     if (!valido) {
         return PUENTE_ERROR_RESPUESTA;
+    }
+    /* Un heartbeat confirmado tambien actualiza el contacto local. */
+    if (nodos_heartbeat_recibido(p->estado, destino, ahora) != NODOS_OK) {
+        return PUENTE_ERROR_NODO;
     }
     stats_registrar(STATS_HEARTBEAT_ENVIADO);
     return PUENTE_OK;
