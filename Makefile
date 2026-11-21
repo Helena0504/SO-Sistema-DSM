@@ -88,3 +88,20 @@ build/dsm_nodo: sistema/app/cluster/main.c $(API) $(MODULOS) | build
 
 cluster: build/dsm_nodo
 	./build/dsm_nodo sistema/sistema.conf
+	
+	
+	
+# ---- app1: Image Filter Engine sobre DSM (C++ + OpenMP) ----
+# Los modulos del DSM (C) se compilan con gcc y se enlazan con g++.
+APP1_DIR = sistema/app/app1
+APP1_OBJS = $(patsubst %.c,build/obj/%.o,$(API) $(MODULOS))
+ 
+build/obj/%.o: %.c | build
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+ 
+build/app1: $(APP1_DIR)/src/main.cpp $(APP1_OBJS) | build
+	g++ -std=c++17 -O2 -Wall -Wextra -pthread -fopenmp $^ -o $@
+ 
+app1: build/app1
+	./build/app1 sistema/sistema.conf
