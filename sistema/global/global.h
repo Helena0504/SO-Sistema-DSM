@@ -66,8 +66,14 @@ typedef struct {
     uint32_t tamano_pagina;
     uint64_t memoria_total;
     uint64_t memoria_libre;
+    uint64_t memoria_global;
+    uint64_t direccion_base;
+    uint64_t memoria_por_nodo;
+    uint32_t cantidad_nodos;
+    uint32_t paginas_por_nodo;
     uint32_t numero_paginas;
     uint32_t nodos_conocidos;
+    void *espacio_global;
     dsm_pagina_t *tabla_paginas;
     dsm_nodo_t *tabla_nodos;
     dsm_asignacion_t *tabla_asignaciones;

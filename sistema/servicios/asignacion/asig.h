@@ -17,7 +17,9 @@ typedef enum {
 asig_resultado_t asig_tabla_inicializar(dsm_estado_t *estado,
                                        uint32_t nodo_id,
                                        uint32_t tamano_pagina,
-                                       uint64_t memoria_total);
+                                       uint64_t memoria_por_nodo,
+                                       uint64_t direccion_base,
+                                       uint32_t cantidad_nodos);
 
 /* Reserva paginas locales consecutivas para un proceso con mmap.
    Devuelve un puntero utilizable; por ahora no hay acceso remoto. */

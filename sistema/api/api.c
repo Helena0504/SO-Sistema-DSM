@@ -242,13 +242,17 @@ status_t sistema_init(const char *config_path)
 
     memset(&estado_local, 0, sizeof(estado_local));
 
-    // 3. Inicializar memoria local
+
+    
+    // 3. Inicializar espacio global de memoria
     asig_resultado_t resultado_asig =
         asig_tabla_inicializar(
             &estado_local,
             configuracion.nodo_id,
             configuracion.pageSize,
-            configuracion.memoriaNodo
+            configuracion.memoriaNodo,
+            configuracion.direccionBase,
+            configuracion.cantidad_nodos
         );
 
     if (resultado_asig != ASIG_OK) {
