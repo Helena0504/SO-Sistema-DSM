@@ -88,6 +88,9 @@ build/dsm_nodo: sistema/app/cluster/main.c $(API) $(MODULOS) | build
 
 cluster: build/dsm_nodo
 	./build/dsm_nodo sistema/sistema.conf
+
+# Reglas de la aplicacion Huffman
+-include sistema/app/huffman/huffman.mk
 	
 	
 	
