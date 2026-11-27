@@ -170,8 +170,11 @@ int consumidor(unsigned char *area, uint32_t page_size,
         std::cerr << "No se pudo conectar con el nodo origen.\n";
         return 1;
     }
-    if (sistema_red_pedir_pagina(origen, 0) != OK) {
-        std::cerr << "No se pudo recuperar la pagina DSM de metadatos.\n";
+    /* La region ya esta marcada como remota. Al leer el encabezado,
+       SIGSEGV inicia la recuperacion sin solicitar la pagina manualmente. */
+    stats_t antes{};
+    if (sistema_stats(static_cast<int>(sistema_node_id()), &antes) != OK) {
+        std::cerr << "No se pudieron consultar las estadisticas iniciales.\n";
         return 1;
     }
     Header hdr{};
@@ -185,12 +188,8 @@ int consumidor(unsigned char *area, uint32_t page_size,
     }
     const uint64_t total = static_cast<uint64_t>(hdr.compressed_bytes) + hdr.codes_bytes;
     const uint32_t paginas = static_cast<uint32_t>((total + page_size - 1) / page_size);
-    for (uint32_t i = 1; i <= paginas; ++i) {
-        if (sistema_red_pedir_pagina(origen, i) != OK) {
-            std::cerr << "Fallo la transferencia de pagina DSM " << i << ".\n";
-            return 1;
-        }
-    }
+    /* escribir_archivo lee directamente la memoria DSM; los accesos a
+       paginas INVALID desencadenan las solicitudes de red automaticamente. */
     const std::string nombre = "build/huffman_recibido.txt";
     if (!escribir_archivo(nombre + ".ece2103", area + page_size, hdr.compressed_bytes) ||
         !escribir_archivo("build/huffman_recibido_codes.cod",
@@ -198,8 +197,15 @@ int consumidor(unsigned char *area, uint32_t page_size,
         std::cerr << "No se pudieron escribir los archivos recuperados.\n";
         return 1;
     }
-    std::cout << "[Nodo receptor] " << (paginas + 1)
-              << " paginas recibidas por la API DSM. Descomprimiendo...\n";
+    stats_t despues{};
+    if (sistema_stats(static_cast<int>(sistema_node_id()), &despues) != OK ||
+        despues.paginas_recibidas < antes.paginas_recibidas + paginas + 1) {
+        std::cerr << "No se recibieron las paginas DSM esperadas.\n";
+        return 1;
+    }
+    std::cout << "[Nodo receptor] " <<
+        (despues.paginas_recibidas - antes.paginas_recibidas)
+        << " paginas recuperadas automaticamente. Descomprimiendo...\n";
     if (ejecutar_huffman("-d", nombre + ".ece2103") != 0) {
         std::cerr << "Fallo el decodificador Huffman.\n";
         return 1;
@@ -248,13 +254,11 @@ int main(int argc, char **argv)
     auto *area = static_cast<unsigned char *>(memoria);
     int resultado = 0;
     if (conf.nodo_id != origen) {
-        for (uint32_t i = 0; i < kPages; ++i) {
-            if (sistema_page_set_state(i, PAGE_INVALID) != OK ||
-                sistema_page_registrar_origen(i, origen) != OK) {
-                std::cerr << "Fallo al preparar pagina remota " << i << ".\n";
-                resultado = 1;
-                break;
-            }
+        /* Todas las paginas de esta reserva se recuperan bajo demanda.
+           La API conserva sus IDs logicos para PAGE_REQUEST. */
+        if (sistema_region_remota(area, origen) != OK) {
+            std::cerr << "No se pudo preparar la region remota de Huffman.\n";
+            resultado = 1;
         }
     } else {
         resultado = productor(area, conf.pageSize, argv[2]);

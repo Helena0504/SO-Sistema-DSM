@@ -131,3 +131,12 @@ build/app1: $(APP1_DIR)/src/main.cpp $(APP1_OBJS) | build
  
 app1: build/app1
 	./build/app1 sistema/sistema.conf
+
+# Prueba de extremo a extremo: Huffman en dos nodos con lectura remota automatica.
+.PHONY: test-huffman-cluster
+test-huffman-cluster:
+	python3 sistema/app/huffman/preparar_cluster.py
+	$(MAKE) build/huffman_cluster
+	python3 pruebas/test_huffman_cluster.py
+
+-include sistema/app/huffman/huffman_cluster.mk
