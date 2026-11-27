@@ -292,8 +292,16 @@ static void manejar_fallo_pagina(int senal, siginfo_t *info, void *contexto)
                     break;
                 }
             }
+            /* Otro hilo pudo resolver la pagina mientras esperabamos.
+               No volver a solicitar una copia que ya esta disponible. */
+            dsm_msi_t actual = (dsm_msi_t)pagina->estado_msi;
+            if ((previo == DSM_INVALID && actual != DSM_INVALID) ||
+                (previo == DSM_SHARED && actual == DSM_MODIFIED)) {
+                __atomic_store_n(&fallo_pendiente, 0, __ATOMIC_RELEASE);
+                return;
+            }
             pagina_pendiente = (sig_atomic_t)pagina_id;
-            tipo_pendiente = (sig_atomic_t)previo;
+            tipo_pendiente = (sig_atomic_t)actual;
             char pedido = 'F', respuesta = 'N';
             ssize_t enviado = write(canal_pedidos[1], &pedido, 1);
             ssize_t leido = -1;

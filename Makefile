@@ -14,12 +14,12 @@ MODULOS = $(ASIG) $(NODOS) $(PAGER) $(PAGER_NODOS) $(RED) $(STATS) $(CONFIG) $(L
 
 PRUEBAS = test_global test_asig test_asig_memoria test_nodos \
           test_nodos_heartbeat test_pager test_pager_fallos \
-          test_pager_nodos test_integracion test_api test_stats test_puente test_api_red test_api_fallos_red test_api_regiones_remotas test_api_reserva_distribuida
+          test_pager_nodos test_integracion test_api test_stats test_puente test_api_red test_api_fallos_red test_api_regiones_remotas test_api_reserva_distribuida test_api_msi_concurrencia test_api_msi_escalabilidad
 BINARIOS = $(addprefix build/,$(PRUEBAS))
 
 HTTP = sistema/app/cluster/http.c
 
-.PHONY: all test test-integracion test-red demo cluster clean
+.PHONY: all test test-integracion test-red test-msi-escala demo cluster clean
 
 all: $(BINARIOS) build/prototipo_local
 
@@ -74,6 +74,12 @@ build/test_api_regiones_remotas: pruebas/test_api_regiones_remotas.c $(API) $(MO
 build/test_api_reserva_distribuida: pruebas/test_api_reserva_distribuida.c $(API) $(MODULOS) | build
 	$(CC) $(CFLAGS) $^ -o $@
 
+build/test_api_msi_concurrencia: pruebas/test_api_msi_concurrencia.c $(API) $(MODULOS) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/test_api_msi_escalabilidad: pruebas/test_api_msi_escalabilidad.c $(API) $(MODULOS) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
 build/prototipo_local: sistema/app/demo/prototipo_local.c $(ASIG) $(NODOS) $(PAGER) $(PAGER_NODOS) | build
 	$(CC) $(CFLAGS) $^ -o $@
 
@@ -82,6 +88,11 @@ test: $(BINARIOS)
 
 test-integracion: build/test_integracion
 	./build/test_integracion
+
+test-msi-escala: build/test_api_msi_escalabilidad
+	DSM_MSI_NODOS=8 ./build/test_api_msi_escalabilidad
+	DSM_MSI_NODOS=16 ./build/test_api_msi_escalabilidad
+	DSM_MSI_NODOS=20 ./build/test_api_msi_escalabilidad
 
 test-red: build/test_puente build/test_api_red build/test_api_fallos_red
 	./build/test_puente

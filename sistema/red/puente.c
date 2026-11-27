@@ -175,6 +175,11 @@ static int atender_heartbeat(int fd, const red_mensaje_t *msg, void *ctx)
     return 1;
 }
 
+/* El servidor ya mantiene p->mutex al conceder escritura exclusiva. */
+static puente_resultado_t invalidar_copia_bloqueada(puente_t *p,
+                                                 uint32_t destino,
+                                                 uint32_t pagina_id);
+
 static int atender_pagina(int fd, const red_mensaje_t *msg, void *ctx)
 {
     puente_t *p = ctx;
@@ -222,7 +227,7 @@ static int atender_pagina(int fd, const red_mensaje_t *msg, void *ctx)
             /* Una lectura desde el origen del cliente debe estar al dia. */
             for (uint32_t id = 0; id < DSM_MAX_NODOS; id++) {
                 if ((otras & (UINT64_C(1) << id)) &&
-                    puente_invalidar_copia(p, id, pagina_id) != PUENTE_OK) {
+                    invalidar_copia_bloqueada(p, id, pagina_id) != PUENTE_OK) {
                     pthread_mutex_unlock(&p->mutex);
                     free(buffer);
                     return responder_error(fd, msg, p, PROTOCOL_ERROR_OCUPADO);
@@ -626,7 +631,7 @@ puente_resultado_t puente_pedir_escritura(puente_t *p, uint32_t origen,
     return solicitar_pagina(p, origen, pagina_id, PROTOCOL_ACCESO_ESCRITURA);
 }
 
-puente_resultado_t puente_invalidar_copia(puente_t *p, uint32_t destino,
+static puente_resultado_t invalidar_copia_bloqueada(puente_t *p, uint32_t destino,
                                           uint32_t pagina_id)
 {
     dsm_nodo_t nodo;
@@ -652,15 +657,24 @@ puente_resultado_t puente_invalidar_copia(puente_t *p, uint32_t destino,
     if (!valido) {
         return PUENTE_ERROR_RESPUESTA;
     }
-    pthread_mutex_lock(&p->mutex);
     pager_resultado_t pr = pager_confirmar_invalidacion(p->estado, pagina_id,
                                                         destino);
-    pthread_mutex_unlock(&p->mutex);
     if (pr != PAGER_OK) {
         return PUENTE_ERROR_PAGINA;
     }
     stats_registrar(STATS_INVALIDACION_ENVIADA);
     return PUENTE_OK;
+}
+
+
+puente_resultado_t puente_invalidar_copia(puente_t *p, uint32_t destino,
+                                          uint32_t pagina_id)
+{
+    if (p == NULL || !p->iniciado) return PUENTE_ERROR_PARAMETROS;
+    pthread_mutex_lock(&p->mutex);
+    puente_resultado_t r = invalidar_copia_bloqueada(p, destino, pagina_id);
+    pthread_mutex_unlock(&p->mutex);
+    return r;
 }
 
 puente_resultado_t puente_verificar_heartbeat(puente_t *p,
