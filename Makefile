@@ -17,6 +17,8 @@ PRUEBAS = test_global test_asig test_asig_memoria test_nodos \
           test_pager_nodos test_integracion test_api test_stats test_puente test_api_red
 BINARIOS = $(addprefix build/,$(PRUEBAS))
 
+HTTP = sistema/app/cluster/http.c
+
 .PHONY: all test test-integracion test-red demo cluster clean
 
 all: $(BINARIOS) build/prototipo_local
@@ -83,7 +85,7 @@ clean:
 	rm -rf build
 
 # Ejecutable para correr el mismo programa en todas las computadoras.
-build/dsm_nodo: sistema/app/cluster/main.c $(API) $(MODULOS) | build
+build/dsm_nodo: sistema/app/cluster/main.c $(HTTP) $(API) $(MODULOS) | build
 	$(CC) $(CFLAGS) $^ -o $@
 
 cluster: build/dsm_nodo

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "http.h"
 
 static volatile sig_atomic_t continuar = 1;
 
@@ -80,6 +81,8 @@ static void mostrar_pagina(const char *pagina)
 }
 
 /* Cada nodo intenta conocer a todos los que figuran en sistema.conf. */
+
+/* Cada nodo intenta conectarse automaticamente con todos los peers configurados. */
 static void mantener_cluster(const config_t *conf)
 {
     for (uint32_t i = 0; i < conf->cantidad_nodos; i++) {
@@ -87,19 +90,23 @@ static void mantener_cluster(const config_t *conf)
         if (remoto->id == conf->nodo_id) continue;
 
         node_info_t info;
-        if (sistema_node_info((int)remoto->id, &info) != OK || !info.estado) {
-            if (sistema_red_unirse(remoto->ip, conf->puertoNodos) == OK) {
-                printf("[RED] Nodo %u conectado: %s\n", remoto->id,
-                       remoto->ip);
-            }
-        } else {
-            (void)sistema_red_heartbeat(remoto->id);
+        int conectado = sistema_node_info((int)remoto->id, &info) == OK &&
+                        info.estado;
+
+        if (conectado &&
+            sistema_red_heartbeat(remoto->id) == OK) {
+            continue;
+        }
+
+        if (sistema_red_unirse(remoto->ip, conf->puertoNodos) == OK) {
+            printf("[RED] Conexion con nodo %u establecida: %s\n",
+                   remoto->id, remoto->ip);
         }
     }
+
     uint32_t caidos = 0;
     if (sistema_red_verificar_nodos(&caidos) == OK && caidos > 0) {
-        printf("[RED] %u nodo(s) sin heartbeat. Reintentando conexion.\n",
-               caidos);
+        printf("[RED] %u nodo(s) sin heartbeat.\n", caidos);
     }
 }
 
@@ -221,6 +228,11 @@ int main(int argc, char **argv)
         sistema_finalize();
         return 1;
     }
+    if (http_iniciar(&config) != 0) {
+        fputs("No se pudo iniciar el servidor HTTP en el puerto 28005.\n", stderr);
+        sistema_finalize();
+        return 1;
+    }
 
     printf("DSM iniciado: nodo %u, IP %s, %u nodos configurados\n",
            config.nodo_id, config.ip_local, config.cantidad_nodos);
@@ -253,6 +265,7 @@ int main(int argc, char **argv)
         }
     }
     pthread_join(mantenimiento, NULL);
+	http_detener();
     puts("Deteniendo nodo...");
     if (sistema_finalize() != OK) {
         fputs("Error finalizando nodo.\n", stderr);
