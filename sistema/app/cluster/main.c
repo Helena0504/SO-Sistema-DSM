@@ -23,10 +23,10 @@ static void terminar(int senal)
 
 static void ayuda(void)
 {
-    puts("Comandos: nodos | pagina | tabla | stats | pedir ID | invalidar ID");
+    puts("Comandos: nodos | pagina | leer | tabla | stats | pedir ID | invalidar ID");
     puts("          modificar | escribir TEXTO | ayuda | salir");
-    puts("Para compartir una pagina: el nodo origen escribe; otros usan pedir ID.");
-    puts("El origen invalida las copias antes de cambiar a MODIFIED.");
+    puts("Las paginas remotas se recuperan automaticamente al leerlas.");
+    puts("Las escrituras invalidan las copias compartidas cuando corresponde.");
 }
 
 static const char *nombre_estado(page_state_t estado)
@@ -133,6 +133,10 @@ static void ejecutar(const char *linea, const config_t *conf, char *pagina)
         mostrar_nodos(conf);
     } else if (strcmp(linea, "pagina") == 0) {
         mostrar_pagina(pagina);
+    } else if (strcmp(linea, "leer") == 0) {
+        /* El acceso real produce SIGSEGV si la pagina esta INVALID. */
+        printf("Lectura de pagina 0: %s\n", pagina);
+        mostrar_pagina(pagina);
     } else if (strcmp(linea, "tabla") == 0) {
         sistema_print_page_table((int)conf->nodo_id);
     } else if (strcmp(linea, "stats") == 0) {
@@ -175,8 +179,9 @@ static void ejecutar(const char *linea, const config_t *conf, char *pagina)
                r == OK ? "correcto" : "denegado", (int)r);
     } else if (strncmp(linea, "escribir ", 8) == 0) {
         page_state_t e;
-        if (sistema_page_get_state(0, &e) != OK || e != PAGE_MODIFIED) {
-            puts("Primero necesita el estado MODIFIED; invalide copias remotas.");
+        if (conf->nodo_id != conf->nodos[0].id ||
+            sistema_page_get_state(0, &e) != OK || e == PAGE_INVALID) {
+            puts("Solo el nodo origen puede escribir una pagina valida.");
         } else {
             snprintf(pagina, conf->pageSize, "%s", linea + 8);
             puts("Contenido actualizado.");

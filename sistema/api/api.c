@@ -376,6 +376,41 @@ status_t sistema_init(const char *config_path)
 
 
 
+/* Se ejecuta desde el hilo del paginador, no desde el manejador SIGSEGV. */
+static int resolver_pagina_por_red(void *contexto, uint32_t pagina_id,
+                                  dsm_msi_t estado_previo)
+{
+    (void)contexto;
+    if (!red_activa || pagina_id >= estado_local.numero_paginas) {
+        return -1;
+    }
+    dsm_pagina_t *pagina = &estado_local.tabla_paginas[pagina_id];
+    if (!pagina->ocupada) {
+        return -1;
+    }
+    if (estado_previo == DSM_INVALID) {
+        if (pagina->nodo_origen == estado_local.nodo_id) {
+            return -1;
+        }
+        return puente_pedir_pagina(&puente_local, pagina->nodo_origen,
+                                   pagina_id) == PUENTE_OK ? 0 : -1;
+    }
+    if (estado_previo == DSM_SHARED &&
+        pagina->nodo_origen == estado_local.nodo_id) {
+        uint64_t otras = pagina->nodos_con_copia &
+                         ~(UINT64_C(1) << estado_local.nodo_id);
+        for (uint32_t id = 0; id < DSM_MAX_NODOS; ++id) {
+            if ((otras & (UINT64_C(1) << id)) != 0 &&
+                puente_invalidar_copia(&puente_local, id, pagina_id) != PUENTE_OK) {
+                return -1;
+            }
+        }
+        return pager_cambiar_estado(&estado_local, pagina_id,
+                                    DSM_MODIFIED) == PAGER_OK ? 0 : -1;
+    }
+    return -1;
+}
+
 /* La red se activa por separado para conservar el modo local de prueba. */
 status_t sistema_red_iniciar(void)
 {
@@ -385,6 +420,7 @@ status_t sistema_red_iniciar(void)
                                          &configuracion);
     if (r == PUENTE_OK) {
         red_activa = 1;
+        pager_fallos_configurar_resolucion(resolver_pagina_por_red, NULL);
     }
     pthread_mutex_unlock(&mutex_api);
     FALLO(convertir_error_puente(r));
@@ -445,6 +481,7 @@ status_t sistema_red_detener(void)
     REQUIERE_INIT();
     pthread_mutex_lock(&mutex_api);
     if (red_activa) {
+        pager_fallos_configurar_resolucion(NULL, NULL);
         puente_detener(&puente_local);
         red_activa = 0;
     }
@@ -687,6 +724,7 @@ status_t sistema_finalize(void)
 
     /* Detener los servidores antes de liberar las tablas. */
     if (red_activa) {
+        pager_fallos_configurar_resolucion(NULL, NULL);
         puente_detener(&puente_local);
         red_activa = 0;
     }
