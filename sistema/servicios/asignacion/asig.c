@@ -2,6 +2,7 @@
 #include "asig.h"
 
 #include <stdint.h>
+#include <string.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -72,6 +73,216 @@ asig_resultado_t asig_tabla_inicializar(dsm_estado_t *estado,
     return ASIG_OK;
 }
 
+static uint32_t paginas_fisicas(const dsm_estado_t *estado)
+{
+    return (uint32_t)(estado->memoria_total / estado->tamano_pagina);
+}
+
+static uint32_t entrada_disponible(const dsm_estado_t *estado)
+{
+    for (uint32_t i = 0; i < estado->numero_paginas; i++) {
+        if (estado->tabla_asignaciones[i].cantidad_paginas == 0) {
+            return i;
+        }
+    }
+    return estado->numero_paginas;
+}
+
+asig_resultado_t asig_tabla_ampliar(dsm_estado_t *estado, uint32_t total)
+{
+    if (estado == NULL || estado->tabla_paginas == NULL ||
+        estado->tabla_asignaciones == NULL || total < estado->numero_paginas) {
+        return ASIG_ERROR_PARAMETROS;
+    }
+    if (total == estado->numero_paginas) {
+        return ASIG_OK;
+    }
+    dsm_pagina_t *paginas = calloc(total, sizeof(*paginas));
+    dsm_asignacion_t *asignaciones = calloc(total, sizeof(*asignaciones));
+    if (paginas == NULL || asignaciones == NULL) {
+        free(paginas);
+        free(asignaciones);
+        return ASIG_ERROR_MEMORIA;
+    }
+    memcpy(paginas, estado->tabla_paginas,
+           estado->numero_paginas * sizeof(*paginas));
+    memcpy(asignaciones, estado->tabla_asignaciones,
+           estado->numero_paginas * sizeof(*asignaciones));
+    for (uint32_t i = estado->numero_paginas; i < total; ++i) {
+        reiniciar_pagina(&paginas[i], i, estado->nodo_id);
+    }
+    free(estado->tabla_paginas);
+    free(estado->tabla_asignaciones);
+    estado->tabla_paginas = paginas;
+    estado->tabla_asignaciones = asignaciones;
+    estado->numero_paginas = total;
+    return ASIG_OK;
+}
+
+asig_resultado_t asig_plan_mixto(const dsm_estado_t *estado, size_t bytes,
+                                asig_plan_mixto_t *plan)
+{
+    if (estado == NULL || plan == NULL || bytes == 0 ||
+        estado->tabla_paginas == NULL || estado->tamano_pagina == 0 ||
+        !pagina_sistema_compatible(estado->tamano_pagina)) {
+        return ASIG_ERROR_PARAMETROS;
+    }
+    size_t tam = estado->tamano_pagina;
+    size_t cantidad = bytes / tam + (bytes % tam != 0);
+    uint32_t fisicas = paginas_fisicas(estado);
+    if (cantidad > UINT32_MAX || cantidad > SIZE_MAX / tam ||
+        cantidad > estado->numero_paginas) {
+        return ASIG_ERROR_SIN_ESPACIO;
+    }
+    uint32_t sufijo = 0;
+    for (uint32_t i = fisicas; i > 0; --i) {
+        if (estado->tabla_paginas[i - 1].ocupada) break;
+        ++sufijo;
+    }
+    uint32_t locales = cantidad < sufijo ? (uint32_t)cantidad : sufijo;
+    uint32_t remotas = (uint32_t)cantidad - locales;
+    if (remotas == 0 || remotas > estado->numero_paginas - fisicas ||
+        (uint64_t)locales * tam > estado->memoria_libre) {
+        return ASIG_ERROR_SIN_ESPACIO;
+    }
+    uint32_t inicio = fisicas - locales;
+    int disponible = 1;
+    for (uint32_t i = 0; i < remotas; ++i) {
+        if (estado->tabla_paginas[fisicas + i].ocupada) disponible = 0;
+    }
+    if (!disponible) {
+        /* Otra region ya ocupa el inicio remoto: reservar una nueva region
+           completa en un intervalo remoto libre. */
+        locales = 0;
+        remotas = (uint32_t)cantidad;
+        uint32_t seguidas = 0;
+        inicio = estado->numero_paginas;
+        for (uint32_t i = fisicas; i < estado->numero_paginas; i++) {
+            if (estado->tabla_paginas[i].ocupada) seguidas = 0;
+            else if (++seguidas == remotas) {
+                inicio = i + 1 - remotas;
+                break;
+            }
+        }
+        if (inicio == estado->numero_paginas) return ASIG_ERROR_SIN_ESPACIO;
+    }
+    if (entrada_disponible(estado) == estado->numero_paginas) {
+        return ASIG_ERROR_SIN_ESPACIO;
+    }
+    *plan = (asig_plan_mixto_t){
+        .inicio = inicio,
+        .locales = locales,
+        .remotas = remotas
+    };
+    return ASIG_OK;
+}
+
+asig_resultado_t asig_memoria_reservar_mixta(dsm_estado_t *estado,
+                   uint64_t proceso_id, const asig_plan_mixto_t *plan,
+                   uint32_t remoto, void **direccion)
+{
+    if (direccion != NULL) *direccion = NULL;
+    if (estado == NULL || plan == NULL || direccion == NULL ||
+        proceso_id == 0 || remoto >= DSM_MAX_NODOS ||
+        remoto == estado->nodo_id || plan->remotas == 0 ||
+        plan->inicio + (uint64_t)plan->locales + plan->remotas >
+        estado->numero_paginas) {
+        return ASIG_ERROR_PARAMETROS;
+    }
+    uint32_t entrada = entrada_disponible(estado);
+    if (entrada == estado->numero_paginas) return ASIG_ERROR_SIN_ESPACIO;
+    uint32_t paginas = plan->locales + plan->remotas;
+    size_t tam = estado->tamano_pagina;
+    void *base = mmap(NULL, (size_t)paginas * tam,
+                      PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) return ASIG_ERROR_SISTEMA;
+    if (mprotect((char *)base + (size_t)plan->locales * tam,
+                 (size_t)plan->remotas * tam, PROT_NONE) != 0) {
+        munmap(base, (size_t)paginas * tam);
+        return ASIG_ERROR_SISTEMA;
+    }
+    for (uint32_t i = 0; i < paginas; ++i) {
+        dsm_pagina_t *p = &estado->tabla_paginas[plan->inicio + i];
+        p->ocupada = 1;
+        p->proceso_id = proceso_id;
+        if (i < plan->locales) {
+            p->estado_msi = DSM_MODIFIED;
+            p->nodo_origen = estado->nodo_id;
+            p->nodo_exclusivo = estado->nodo_id;
+            p->nodos_con_copia = UINT64_C(1) << estado->nodo_id;
+        } else {
+            p->estado_msi = DSM_INVALID;
+            p->nodo_origen = remoto;
+            p->nodo_exclusivo = DSM_NODO_SIN_EXCLUSIVIDAD;
+            p->nodos_con_copia = 0;
+        }
+    }
+    estado->tabla_asignaciones[entrada] = (dsm_asignacion_t){
+        .proceso_id = proceso_id, .region_id = entrada + 1,
+        .pagina_inicio = plan->inicio, .cantidad_paginas = paginas,
+        .nodo_solicitante = remoto, .base_virtual = (uintptr_t)base
+    };
+    estado->memoria_libre -= (uint64_t)plan->locales * tam;
+    *direccion = base;
+    return ASIG_OK;
+}
+
+asig_resultado_t asig_reservar_paginas_remotas(dsm_estado_t *estado,
+                   uint64_t proceso_id, uint32_t inicio, uint32_t paginas)
+{
+    if (estado == NULL || estado->tabla_paginas == NULL ||
+        estado->tabla_asignaciones == NULL || proceso_id == 0 || paginas == 0 ||
+        inicio >= estado->numero_paginas ||
+        paginas > estado->numero_paginas - inicio ||
+        (uint64_t)paginas * estado->tamano_pagina > estado->memoria_libre) {
+        return ASIG_ERROR_SIN_ESPACIO;
+    }
+    uint32_t entrada = entrada_disponible(estado);
+    if (entrada == estado->numero_paginas) return ASIG_ERROR_SIN_ESPACIO;
+    for (uint32_t i = 0; i < paginas; ++i) {
+        if (estado->tabla_paginas[inicio + i].ocupada) {
+            return ASIG_ERROR_SIN_ESPACIO;
+        }
+    }
+    size_t tam = estado->tamano_pagina;
+    void *base = mmap(NULL, (size_t)paginas * tam,
+                      PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) return ASIG_ERROR_SISTEMA;
+    for (uint32_t i = 0; i < paginas; ++i) {
+        dsm_pagina_t *p = &estado->tabla_paginas[inicio + i];
+        p->ocupada = 1;
+        p->proceso_id = proceso_id;
+        p->nodo_origen = estado->nodo_id;
+        p->nodo_exclusivo = estado->nodo_id;
+        p->estado_msi = DSM_MODIFIED;
+        p->nodos_con_copia = UINT64_C(1) << estado->nodo_id;
+    }
+    estado->tabla_asignaciones[entrada] = (dsm_asignacion_t){
+        .proceso_id = proceso_id, .region_id = entrada + 1,
+        .pagina_inicio = inicio, .cantidad_paginas = paginas,
+        .nodo_solicitante = estado->nodo_id, .base_virtual = (uintptr_t)base
+    };
+    estado->memoria_libre -= (uint64_t)paginas * tam;
+    return ASIG_OK;
+}
+
+asig_resultado_t asig_liberar_paginas_remotas(dsm_estado_t *estado,
+                   uint64_t proceso_id, uint32_t inicio, uint32_t paginas)
+{
+    if (estado == NULL || paginas == 0 || estado->tabla_asignaciones == NULL) {
+        return ASIG_ERROR_PARAMETROS;
+    }
+    for (uint32_t i = 0; i < estado->numero_paginas; ++i) {
+        const dsm_asignacion_t *a = &estado->tabla_asignaciones[i];
+        if (a->cantidad_paginas == paginas && a->pagina_inicio == inicio &&
+            a->proceso_id == proceso_id &&
+            a->nodo_solicitante == estado->nodo_id) {
+            return asig_memoria_liberar(estado, (void *)a->base_virtual);
+        }
+    }
+    return ASIG_ERROR_NO_ENCONTRADO;
+}
+
 asig_resultado_t asig_memoria_reservar(dsm_estado_t *estado,
                                       uint64_t proceso_id,
                                       size_t bytes,
@@ -95,10 +306,11 @@ asig_resultado_t asig_memoria_reservar(dsm_estado_t *estado,
         return ASIG_ERROR_SIN_ESPACIO;
     }
 
-    /* Elegir un intervalo consecutivo de paginas libres del nodo. */
+    /* La asignacion local no invade los IDs logicos de respaldo remoto. */
+    uint32_t limite_local = paginas_fisicas(estado);
     uint32_t inicio = 0;
     size_t continuas = 0;
-    for (uint32_t i = 0; i < estado->numero_paginas; ++i) {
+    for (uint32_t i = 0; i < limite_local; ++i) {
         if (estado->tabla_paginas[i].ocupada) {
             continuas = 0;
         } else {
@@ -183,7 +395,17 @@ asig_resultado_t asig_memoria_liberar(dsm_estado_t *estado,
             reiniciar_pagina(&estado->tabla_paginas[pagina_id],
                              pagina_id, estado->nodo_id);
         }
-        estado->memoria_libre += longitud;
+        if (asignacion->nodo_solicitante != estado->nodo_id) {
+            /* Solo el prefijo fisico consumio capacidad del nodo local. */
+            uint32_t fisicas = paginas_fisicas(estado);
+            uint32_t fin = asignacion->pagina_inicio + asignacion->cantidad_paginas;
+            uint32_t limite = fin < fisicas ? fin : fisicas;
+            uint32_t propias = limite > asignacion->pagina_inicio
+                            ? limite - asignacion->pagina_inicio : 0;
+            estado->memoria_libre += (uint64_t)propias * estado->tamano_pagina;
+        } else {
+            estado->memoria_libre += longitud;
+        }
         *asignacion = (dsm_asignacion_t){0};
         return ASIG_OK;
     }

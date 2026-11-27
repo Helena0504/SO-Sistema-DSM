@@ -56,6 +56,12 @@ pager_resultado_t pager_instalar_copia(dsm_estado_t *estado,
                                       size_t longitud,
                                       uint32_t version);
 
+/* Concede escritura exclusiva despues de recibir PAGE_DATA para escritura. */
+pager_resultado_t pager_instalar_exclusiva(dsm_estado_t *estado,
+                      uint32_t pagina_id, uint32_t nodo_origen,
+                      const void *contenido, size_t longitud,
+                      uint32_t version);
+
 /* Prepara una asignacion completa para recuperar sus paginas desde otro nodo. */
 pager_resultado_t pager_region_remota(dsm_estado_t *estado,
                                      void *base, uint32_t nodo_origen);

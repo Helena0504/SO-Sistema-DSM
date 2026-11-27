@@ -14,7 +14,7 @@ MODULOS = $(ASIG) $(NODOS) $(PAGER) $(PAGER_NODOS) $(RED) $(STATS) $(CONFIG) $(L
 
 PRUEBAS = test_global test_asig test_asig_memoria test_nodos \
           test_nodos_heartbeat test_pager test_pager_fallos \
-          test_pager_nodos test_integracion test_api test_stats test_puente test_api_red test_api_fallos_red test_api_regiones_remotas
+          test_pager_nodos test_integracion test_api test_stats test_puente test_api_red test_api_fallos_red test_api_regiones_remotas test_api_reserva_distribuida
 BINARIOS = $(addprefix build/,$(PRUEBAS))
 
 HTTP = sistema/app/cluster/http.c
@@ -69,6 +69,9 @@ build/test_api_fallos_red: pruebas/test_api_fallos_red.c $(API) $(MODULOS) | bui
 	$(CC) $(CFLAGS) $^ -o $@
 
 build/test_api_regiones_remotas: pruebas/test_api_regiones_remotas.c $(API) $(MODULOS) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
+build/test_api_reserva_distribuida: pruebas/test_api_reserva_distribuida.c $(API) $(MODULOS) | build
 	$(CC) $(CFLAGS) $^ -o $@
 
 build/prototipo_local: sistema/app/demo/prototipo_local.c $(ASIG) $(NODOS) $(PAGER) $(PAGER_NODOS) | build

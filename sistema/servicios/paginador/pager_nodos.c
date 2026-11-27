@@ -174,10 +174,42 @@ pager_resultado_t pager_instalar_copia(dsm_estado_t *estado,
     }
 
     pagina->estado_msi = DSM_SHARED;
-    pagina->nodo_origen = nodo_origen;
+    /* Si vuelve al nodo de origen desde un escritor exclusivo, conservar
+       el identificador original y no confundirlo con el emisor temporal. */
+    if (!(pagina->nodo_origen == estado->nodo_id &&
+          pagina->nodo_exclusivo == nodo_origen)) {
+        pagina->nodo_origen = nodo_origen;
+    }
     pagina->nodo_exclusivo = DSM_NODO_SIN_EXCLUSIVIDAD;
     pagina->nodos_con_copia = (UINT64_C(1) << estado->nodo_id) |
                               (UINT64_C(1) << nodo_origen);
+    pagina->version = version;
+    return PAGER_OK;
+}
+
+/* El servidor remoto ya invalidó su copia al conceder la exclusividad. */
+pager_resultado_t pager_instalar_exclusiva(dsm_estado_t *estado,
+                      uint32_t pagina_id, uint32_t nodo_origen,
+                      const void *contenido, size_t longitud, uint32_t version)
+{
+    if (estado == NULL || contenido == NULL ||
+        pagina_id >= estado->numero_paginas ||
+        longitud != estado->tamano_pagina) return PAGER_ERROR_PARAMETROS;
+    dsm_pagina_t *pagina = &estado->tabla_paginas[pagina_id];
+    if (!pagina->ocupada || (pagina->estado_msi != DSM_INVALID &&
+                             pagina->estado_msi != DSM_SHARED) ||
+        comprobar_destino(estado, nodo_origen) != PAGER_OK) {
+        return PAGER_ERROR_SIN_DATOS;
+    }
+    void *destino = direccion_para_envio(estado, pagina_id);
+    if (destino == NULL) return PAGER_ERROR_NO_ASIGNADA;
+    if (mprotect(destino, longitud, PROT_READ | PROT_WRITE) != 0)
+        return PAGER_ERROR_SISTEMA;
+    memcpy(destino, contenido, longitud);
+    pagina->estado_msi = DSM_MODIFIED;
+    pagina->nodo_origen = nodo_origen;
+    pagina->nodo_exclusivo = estado->nodo_id;
+    pagina->nodos_con_copia = UINT64_C(1) << estado->nodo_id;
     pagina->version = version;
     return PAGER_OK;
 }

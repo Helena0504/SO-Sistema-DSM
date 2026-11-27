@@ -1,6 +1,7 @@
 #define _DEFAULT_SOURCE
 #include "puente.h"
 #include "../servicios/nodos/nodos.h"
+#include "../servicios/asignacion/asig.h"
 #include "../servicios/paginador/pager.h"
 #include "../servicios/estadisticas/stats.h"
 
@@ -98,6 +99,32 @@ static int responder_ok(int fd, const red_mensaje_t *msg,
 static int atender_nodos(int fd, const red_mensaje_t *msg, void *ctx)
 {
     puente_t *p = ctx;
+    if ((msg->tipo == MEM_REQUEST || msg->tipo == MEM_FREE) &&
+        mensaje_para_mi(p, msg) && emisor_conocido(p, msg->origen) &&
+        msg->longitud == sizeof(msg_memoria_t)) {
+        msg_memoria_t solicitud;
+        memcpy(&solicitud, msg->mensaje, sizeof(solicitud));
+        uint64_t proceso_id = be64toh(solicitud.proceso_id);
+        uint32_t inicio = be32toh(solicitud.pagina_inicio);
+        uint32_t cantidad = be32toh(solicitud.cantidad_paginas);
+        if (proceso_id == 0 || cantidad == 0) {
+            return responder_error(fd, msg, p, PROTOCOL_ERROR_PAGINA_INVALIDA);
+        }
+        pthread_mutex_lock(&p->mutex);
+        asig_resultado_t resultado = msg->tipo == MEM_REQUEST
+            ? asig_reservar_paginas_remotas(p->estado, proceso_id, inicio, cantidad)
+            : asig_liberar_paginas_remotas(p->estado, proceso_id, inicio, cantidad);
+        pthread_mutex_unlock(&p->mutex);
+        if (resultado != ASIG_OK) {
+            return responder_error(fd, msg, p, PROTOCOL_ERROR_SIN_ESPACIO);
+        }
+        stats_registrar(msg->tipo == MEM_REQUEST ? STATS_SOLICITUD_MEMORIA
+                                                  : STATS_LIBERACION_MEMORIA);
+        if (msg->tipo == MEM_FREE) return responder_ok(fd, msg, p);
+        red_responder(fd, msg, MEM_RESPUESTA, (uint16_t)p->estado->nodo_id,
+                      msg->mensaje, msg->longitud);
+        return 1;
+    }
     if ((msg->destino != PROTOCOL_DESTINO_TODOS &&
          !mensaje_para_mi(p, msg)) || msg->origen >= DSM_MAX_NODOS ||
         msg->origen == p->estado->nodo_id || msg->tipo != JOIN_REQUEST ||
@@ -160,7 +187,8 @@ static int atender_pagina(int fd, const red_mensaje_t *msg, void *ctx)
         msg_page_request_t pedido;
         memcpy(&pedido, msg->mensaje, sizeof(pedido));
         uint32_t pagina_id = be32toh(pedido.pagina);
-        if (pedido.acceso != PROTOCOL_ACCESO_LECTURA ||
+        int escritura = pedido.acceso == PROTOCOL_ACCESO_ESCRITURA;
+        if ((pedido.acceso != PROTOCOL_ACCESO_LECTURA && !escritura) ||
             pagina_id >= p->estado->numero_paginas) {
             return responder_error(fd, msg, p, PROTOCOL_ERROR_PAGINA_INVALIDA);
         }
@@ -179,20 +207,49 @@ static int atender_pagina(int fd, const red_mensaje_t *msg, void *ctx)
             free(buffer);
             return responder_error(fd, msg, p, PROTOCOL_ERROR_PAGINA_INVALIDA);
         }
-        /* Proteger la pagina antes del envio, no despues del ACK.
-           Si la conexion falla, se conserva la copia pendiente para
-           evitar que una escritura local deje datos remotos obsoletos. */
-        r = pager_cambiar_estado(p->estado, pagina_id, DSM_SHARED);
+        if (escritura) {
+            /* Conceder exclusividad solo desde el propietario original.
+               Las demas copias deben invalidarse antes del permiso de escritura. */
+            dsm_pagina_t *pagina = &p->estado->tabla_paginas[pagina_id];
+            if (pagina->nodo_origen != p->estado->nodo_id) {
+                pthread_mutex_unlock(&p->mutex);
+                free(buffer);
+                return responder_error(fd, msg, p, PROTOCOL_ERROR_NO_ES_DUENO);
+            }
+            uint64_t otras = pagina->nodos_con_copia &
+                ~((UINT64_C(1) << p->estado->nodo_id) |
+                  (UINT64_C(1) << msg->origen));
+            /* Una lectura desde el origen del cliente debe estar al dia. */
+            for (uint32_t id = 0; id < DSM_MAX_NODOS; id++) {
+                if ((otras & (UINT64_C(1) << id)) &&
+                    puente_invalidar_copia(p, id, pagina_id) != PUENTE_OK) {
+                    pthread_mutex_unlock(&p->mutex);
+                    free(buffer);
+                    return responder_error(fd, msg, p, PROTOCOL_ERROR_OCUPADO);
+                }
+            }
+            r = pager_cambiar_estado(p->estado, pagina_id, DSM_INVALID);
+            if (r == PAGER_OK) {
+                pagina->nodo_exclusivo = msg->origen;
+                pagina->nodos_con_copia = UINT64_C(1) << msg->origen;
+            }
+        } else {
+            /* Proteger la pagina antes del envio. */
+            r = pager_cambiar_estado(p->estado, pagina_id, DSM_SHARED);
+            if (r == PAGER_OK) {
+                p->estado->tabla_paginas[pagina_id].nodos_con_copia |=
+                    UINT64_C(1) << msg->origen;
+            }
+        }
         if (r != PAGER_OK) {
             pthread_mutex_unlock(&p->mutex);
             free(buffer);
             return responder_error(fd, msg, p, PROTOCOL_ERROR_INTERNO);
         }
-        p->estado->tabla_paginas[pagina_id].nodos_con_copia |=
-            UINT64_C(1) << msg->origen;
         msg_page_data_t encabezado = {0};
         encabezado.pagina = htobe32(pagina_id);
-        encabezado.estado_concedido = PROTOCOL_ESTADO_SHARED;
+        encabezado.estado_concedido = escritura ? PROTOCOL_ESTADO_MODIFIED
+                                                : PROTOCOL_ESTADO_SHARED;
         encabezado.version = htobe32(p->estado->tabla_paginas[pagina_id].version);
         memcpy(buffer, &encabezado, sizeof(encabezado));
         red_resultado_t envio = red_responder(
@@ -211,7 +268,8 @@ static int atender_pagina(int fd, const red_mensaje_t *msg, void *ctx)
         if (lectura == RED_OK && ack.tipo == RECIBIDO &&
             ack.longitud == 0 && ack.id_solicitud == msg->id_solicitud &&
             ack.origen == msg->origen && ack.destino == p->estado->nodo_id &&
-            pager_confirmar_copia(p->estado, pagina_id, msg->origen) == PAGER_OK) {
+            (escritura || pager_confirmar_copia(p->estado, pagina_id,
+                                                msg->origen) == PAGER_OK)) {
             responder_ok(fd, msg, p);
             stats_registrar(STATS_PAGINA_ENVIADA);
             stats_sumar(STATS_BYTES_ENVIADOS, tam);
@@ -386,6 +444,49 @@ static int respuesta_valida(const red_mensaje_t *r, uint8_t tipo,
     return r->tipo == tipo && r->origen == emisor && r->destino == destino;
 }
 
+static puente_resultado_t solicitar_memoria(puente_t *p, uint32_t destino,
+                     uint64_t proceso_id, uint32_t inicio, uint32_t paginas,
+                     uint8_t operacion)
+{
+    dsm_nodo_t nodo;
+    if (buscar_remoto(p, destino, &nodo) != PUENTE_OK ||
+        proceso_id == 0 || paginas == 0) return PUENTE_ERROR_NODO;
+    msg_memoria_t pedido = {0};
+    pedido.proceso_id = htobe64(proceso_id);
+    pedido.pagina_inicio = htobe32(inicio);
+    pedido.cantidad_paginas = htobe32(paginas);
+    red_mensaje_t respuesta;
+    red_resultado_t r = red_solicitar(nodo.ip, nodo.puerto_nodos,
+                       operacion, (uint16_t)p->estado->nodo_id,
+                       (uint16_t)destino, &pedido, sizeof(pedido),
+                       &respuesta, RED_TIMEOUT_LE_MS);
+    if (r != RED_OK) {
+        stats_registrar(STATS_ERROR_RED);
+        return PUENTE_ERROR_RED;
+    }
+    int valido = respuesta_valida(&respuesta,
+                       operacion == MEM_REQUEST ? MEM_RESPUESTA : RECIBIDO,
+                       destino, p->estado->nodo_id) &&
+                 ((operacion == MEM_REQUEST &&
+                   respuesta.longitud == sizeof(pedido) &&
+                   memcmp(respuesta.mensaje, &pedido, sizeof(pedido)) == 0) ||
+                  (operacion == MEM_FREE && respuesta.longitud == 0));
+    red_mensaje_liberar(&respuesta);
+    return valido ? PUENTE_OK : PUENTE_ERROR_RESPUESTA;
+}
+
+puente_resultado_t puente_reservar_memoria(puente_t *p, uint32_t nodo,
+                     uint64_t proceso_id, uint32_t inicio, uint32_t paginas)
+{
+    return solicitar_memoria(p, nodo, proceso_id, inicio, paginas, MEM_REQUEST);
+}
+
+puente_resultado_t puente_liberar_memoria(puente_t *p, uint32_t nodo,
+                     uint64_t proceso_id, uint32_t inicio, uint32_t paginas)
+{
+    return solicitar_memoria(p, nodo, proceso_id, inicio, paginas, MEM_FREE);
+}
+
 puente_resultado_t puente_enviar_heartbeat(puente_t *p, uint32_t destino)
 {
     dsm_nodo_t nodo;
@@ -424,14 +525,15 @@ puente_resultado_t puente_enviar_heartbeat(puente_t *p, uint32_t destino)
     return PUENTE_OK;
 }
 
-puente_resultado_t puente_pedir_pagina(puente_t *p, uint32_t origen,
-                                      uint32_t pagina_id)
+static puente_resultado_t solicitar_pagina(puente_t *p, uint32_t origen,
+                                      uint32_t pagina_id, uint8_t acceso)
 {
     dsm_nodo_t nodo;
     if (buscar_remoto(p, origen, &nodo) != PUENTE_OK ||
         pagina_id >= p->estado->numero_paginas ||
         !p->estado->tabla_paginas[pagina_id].ocupada ||
-        p->estado->tabla_paginas[pagina_id].estado_msi != DSM_INVALID) {
+        p->estado->tabla_paginas[pagina_id].estado_msi !=
+            (acceso == PROTOCOL_ACCESO_ESCRITURA ? DSM_SHARED : DSM_INVALID)) {
         return PUENTE_ERROR_PAGINA;
     }
     int fd;
@@ -441,7 +543,7 @@ puente_resultado_t puente_pedir_pagina(puente_t *p, uint32_t origen,
     }
     msg_page_request_t req = {0};
     req.pagina = htobe32(pagina_id);
-    req.acceso = PROTOCOL_ACCESO_LECTURA;
+    req.acceso = acceso;
     uint32_t solicitud_id = 1; /* Una solicitud por conexion en esta version. */
     red_resultado_t r = red_enviar_mensaje(fd, PAGE_REQUEST,
                         (uint16_t)p->estado->nodo_id, (uint16_t)origen,
@@ -462,12 +564,16 @@ puente_resultado_t puente_pedir_pagina(puente_t *p, uint32_t origen,
             msg_page_data_t meta;
             memcpy(&meta, respuesta.mensaje, sizeof(meta));
             if (be32toh(meta.pagina) == pagina_id &&
-                meta.estado_concedido == PROTOCOL_ESTADO_SHARED) {
+                meta.estado_concedido == (acceso == PROTOCOL_ACCESO_ESCRITURA
+                    ? PROTOCOL_ESTADO_MODIFIED : PROTOCOL_ESTADO_SHARED)) {
                 pthread_mutex_lock(&p->mutex);
-                pager_resultado_t pr = pager_instalar_copia(
-                    p->estado, pagina_id, origen,
-                    respuesta.mensaje + sizeof(meta), tam,
-                    be32toh(meta.version));
+                pager_resultado_t pr = acceso == PROTOCOL_ACCESO_ESCRITURA
+                    ? pager_instalar_exclusiva(p->estado, pagina_id, origen,
+                        respuesta.mensaje + sizeof(meta), tam,
+                        be32toh(meta.version))
+                    : pager_instalar_copia(p->estado, pagina_id, origen,
+                        respuesta.mensaje + sizeof(meta), tam,
+                        be32toh(meta.version));
                 pthread_mutex_unlock(&p->mutex);
                 if (pr == PAGER_OK) {
                     r = red_enviar_mensaje(fd, RECIBIDO,
@@ -506,6 +612,18 @@ puente_resultado_t puente_pedir_pagina(puente_t *p, uint32_t origen,
         stats_registrar(STATS_ERROR_RED);
     }
     return resultado;
+}
+
+puente_resultado_t puente_pedir_pagina(puente_t *p, uint32_t origen,
+                                      uint32_t pagina_id)
+{
+    return solicitar_pagina(p, origen, pagina_id, PROTOCOL_ACCESO_LECTURA);
+}
+
+puente_resultado_t puente_pedir_escritura(puente_t *p, uint32_t origen,
+                                         uint32_t pagina_id)
+{
+    return solicitar_pagina(p, origen, pagina_id, PROTOCOL_ACCESO_ESCRITURA);
 }
 
 puente_resultado_t puente_invalidar_copia(puente_t *p, uint32_t destino,

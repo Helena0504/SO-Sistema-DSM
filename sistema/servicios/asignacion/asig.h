@@ -26,6 +26,30 @@ asig_resultado_t asig_memoria_reservar(dsm_estado_t *estado,
                                       size_t bytes,
                                       void **direccion);
 
+/* El tamano de la tabla logica puede ser mayor que la memoria local.
+   Se amplia durante la inicializacion, antes de activar SIGSEGV y TCP. */
+asig_resultado_t asig_tabla_ampliar(dsm_estado_t *estado, uint32_t total);
+
+typedef struct {
+    uint32_t inicio;
+    uint32_t locales;
+    uint32_t remotas;
+} asig_plan_mixto_t;
+
+/* Reserva una region virtual continua, con paginas finales respaldadas en otro nodo.
+   La memoria remota debe haber sido confirmada por MEM_REQUEST. */
+asig_resultado_t asig_plan_mixto(const dsm_estado_t *estado, size_t bytes,
+                                asig_plan_mixto_t *plan);
+asig_resultado_t asig_memoria_reservar_mixta(dsm_estado_t *estado,
+                   uint64_t proceso_id, const asig_plan_mixto_t *plan,
+                   uint32_t remoto, void **direccion);
+
+/* Reserva/libera almacenamiento real en el nodo que recibe MEM_REQUEST. */
+asig_resultado_t asig_reservar_paginas_remotas(dsm_estado_t *estado,
+                   uint64_t proceso_id, uint32_t inicio, uint32_t paginas);
+asig_resultado_t asig_liberar_paginas_remotas(dsm_estado_t *estado,
+                   uint64_t proceso_id, uint32_t inicio, uint32_t paginas);
+
 /* Libera una region previamente creada por asig_memoria_reservar. */
 asig_resultado_t asig_memoria_liberar(dsm_estado_t *estado,
                                      void *direccion);

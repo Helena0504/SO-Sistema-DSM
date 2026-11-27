@@ -43,6 +43,14 @@ puente_resultado_t puente_pedir_pagina(puente_t *puente, uint32_t origen,
                                       uint32_t pagina_id);
 puente_resultado_t puente_invalidar_copia(puente_t *puente, uint32_t destino,
                                           uint32_t pagina_id);
+puente_resultado_t puente_pedir_escritura(puente_t *puente, uint32_t origen,
+                                         uint32_t pagina_id);
+
+/* Reserva y libera paginas de respaldo utilizando MEM_REQUEST y MEM_FREE. */
+puente_resultado_t puente_reservar_memoria(puente_t *puente, uint32_t nodo,
+                       uint64_t proceso_id, uint32_t inicio, uint32_t paginas);
+puente_resultado_t puente_liberar_memoria(puente_t *puente, uint32_t nodo,
+                       uint64_t proceso_id, uint32_t inicio, uint32_t paginas);
 
 /* Solicita contadores al otro nodo mediante QUERY_STATS. */
 puente_resultado_t puente_consultar_stats(puente_t *puente, uint32_t remoto,
