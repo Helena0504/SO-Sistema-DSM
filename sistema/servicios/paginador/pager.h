@@ -56,6 +56,10 @@ pager_resultado_t pager_instalar_copia(dsm_estado_t *estado,
                                       size_t longitud,
                                       uint32_t version);
 
+/* Prepara una asignacion completa para recuperar sus paginas desde otro nodo. */
+pager_resultado_t pager_region_remota(dsm_estado_t *estado,
+                                     void *base, uint32_t nodo_origen);
+
 /* Registra de donde recuperar una pagina invalidada en este nodo. */
 pager_resultado_t pager_registrar_origen(dsm_estado_t *estado,
                                         uint32_t pagina_id,

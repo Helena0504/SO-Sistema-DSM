@@ -1086,6 +1086,18 @@ void sistema_print_page_table(int node_id)
 
 
 
+/* Una reserva puede abarcar varias paginas; se registran juntas para que
+   la aplicacion no tenga que invalidarlas una por una. */
+status_t sistema_region_remota(void *base, uint32_t nodo_origen)
+{
+    REQUIERE_INIT();
+    pthread_mutex_lock(&mutex_api);
+    pager_resultado_t resultado = pager_region_remota(&estado_local, base,
+                                                     nodo_origen);
+    pthread_mutex_unlock(&mutex_api);
+    FALLO(convertir_error_pager(resultado));
+}
+
 // CAMBIAR ESTADO MSI DE UNA PAGINA
 
 status_t sistema_page_set_state( uint32_t pagina_id, page_state_t nuevo_estado)

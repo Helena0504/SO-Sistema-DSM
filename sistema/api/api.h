@@ -132,6 +132,10 @@ void sistema_print_page_table(int node_id);
 
 /* GESTION DEL PAGER */
 
+/* Prepara todas las paginas de una reserva para lectura remota bajo demanda.
+   La reserva del nodo origen debe utilizar los mismos IDs de pagina. */
+status_t sistema_region_remota(void *base, uint32_t nodo_origen);
+
 /* Cambia el estado MSI de una pagina local. */
 status_t sistema_page_set_state(
     uint32_t pagina_id,

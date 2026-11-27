@@ -132,6 +132,59 @@ pager_resultado_t pager_registrar_origen(dsm_estado_t *estado,
     return PAGER_OK;
 }
 
+/* La asociacion se realiza por region, no pagina por pagina. La pagina
+   conserva su identificador logico y sera recuperada al primer acceso. */
+pager_resultado_t pager_region_remota(dsm_estado_t *estado,
+                                     void *base, uint32_t nodo_origen)
+{
+    if (estado == NULL || base == NULL ||
+        estado->tabla_paginas == NULL || estado->tabla_asignaciones == NULL ||
+        estado->tamano_pagina == 0 || nodo_origen >= DSM_MAX_NODOS ||
+        nodo_origen == estado->nodo_id) {
+        return PAGER_ERROR_PARAMETROS;
+    }
+
+    const dsm_asignacion_t *region = NULL;
+    for (uint32_t i = 0; i < estado->numero_paginas; ++i) {
+        const dsm_asignacion_t *actual = &estado->tabla_asignaciones[i];
+        if (actual->cantidad_paginas != 0 &&
+            actual->base_virtual == (uintptr_t)base) {
+            region = actual;
+            break;
+        }
+    }
+    if (region == NULL) {
+        return PAGER_ERROR_NO_ASIGNADA;
+    }
+
+    /* Comprobar toda la reserva antes de cambiar permisos o metadatos. */
+    const uint64_t local = UINT64_C(1) << estado->nodo_id;
+    for (uint32_t i = 0; i < region->cantidad_paginas; ++i) {
+        const dsm_pagina_t *pagina =
+            &estado->tabla_paginas[region->pagina_inicio + i];
+        if (!pagina->ocupada || pagina->estado_msi != DSM_MODIFIED ||
+            pagina->nodo_origen != estado->nodo_id ||
+            pagina->nodos_con_copia != local) {
+            return PAGER_ERROR_SIN_DATOS;
+        }
+    }
+
+    /* Todas las paginas del mismo mmap se protegen en una unica operacion. */
+    size_t longitud = (size_t)region->cantidad_paginas * estado->tamano_pagina;
+    if (mprotect(base, longitud, PROT_NONE) != 0) {
+        return PAGER_ERROR_SISTEMA;
+    }
+    for (uint32_t i = 0; i < region->cantidad_paginas; ++i) {
+        dsm_pagina_t *pagina =
+            &estado->tabla_paginas[region->pagina_inicio + i];
+        pagina->estado_msi = DSM_INVALID;
+        pagina->nodo_origen = nodo_origen;
+        pagina->nodo_exclusivo = DSM_NODO_SIN_EXCLUSIVIDAD;
+        pagina->nodos_con_copia = 0;
+    }
+    return PAGER_OK;
+}
+
 /* El manejador solo comunica el fallo mediante pipes. La red, los mutexes y
    mprotect se ejecutan en un hilo normal. Se atiende un fallo a la vez. */
 static dsm_estado_t *estado_fallos = NULL;
