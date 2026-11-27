@@ -721,15 +721,29 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    // Cada trabajador conserva su buzon accesible desde el inicio.
+    // El coordinador observa las paginas ajenas mediante SIGSEGV.
+    memset(buzon[miIdx], 0, sizeof(Resumen));
     for (uint32_t i = 0; i < N; i++)
-        if (i != miIdx || !soy_coord)
+    {
+        if (i == miIdx)
+            continue;
+        if (soy_coord)
         {
-            // El coordinador deja INVALID las paginas ajenas (destino de PAGE_REQUEST).
-            // Un trabajador deja INVALID tambien la suya: mientras no termine,
-            // nadie puede traerla (el origen rechaza paginas INVALID).
-            if (sistema_page_set_state(i, PAGE_INVALID) != OK)
-                fprintf(stderr, "Aviso: no se pudo dejar INVALID la pagina %u\n", i);
+            if (sistema_region_remota(buzon[i], cfg.nodos[i].id) != OK)
+            {
+                fprintf(stderr, "No se pudo preparar el buzon remoto del nodo %u\n", cfg.nodos[i].id);
+                sistema_finalize();
+                return 1;
+            }
         }
+        else if (sistema_page_set_state(i, PAGE_INVALID) != OK)
+        {
+            fprintf(stderr, "No se pudo proteger la pagina de buzon %u\n", i);
+            sistema_finalize();
+            return 1;
+        }
+    }
 
     if (sistema_red_iniciar() != OK)
     {
@@ -933,48 +947,28 @@ int main(int argc, char **argv)
 
     if (!soy_coord)
     {
-        // TRABAJADOR: libera su pagina de buzon y vuelve a reservar una:
-        // al ser la de menor numero libre, cae otra vez en la pagina miIdx y
-        // nace MODIFIED. Desde ese momento el coordinador puede traerla.
+        // Publicar el resumen en la misma pagina reservada desde el arranque.
+        // Escribir en SHARED invalida automaticamente la copia del coordinador.
         g_fase = FASE_PUBLICAR;
-        bool publicado = false;
-        if (g_continuar && sistema_free(buzon[miIdx]) == OK)
+        Resumen temporal = mi;
+        temporal.magic = 0;
+        memcpy(buzon[miIdx], &temporal, sizeof(temporal));
+        *reinterpret_cast<volatile uint32_t *>(buzon[miIdx]) = RESUMEN_MAGIC;
+        printf("\n[BUZON] Resumen publicado en la pagina %u.\n", miIdx);
+        g_fase = FASE_ESPERA;
+        // Esperar hasta que el coordinador haya recuperado la pagina publicada.
+        stats_t antes{};
+        (void)sistema_stats((int)cfg.nodo_id, &antes);
+        const double limite = ahora() + std::max(15, op.esperar);
+        while (g_continuar && nodo_vivo(id_coord) && ahora() < limite)
         {
-            void *p = sistema_alloc(pageSize);
-            page_state_t st;
-            if (p && sistema_page_get_state(miIdx, &st) == OK && st == PAGE_MODIFIED)
-            {
-                memcpy(p, &mi, sizeof(mi));
-                buzon[miIdx] = p;
-                publicado = true;
-                printf("\n[BUZON] Resumen publicado en la pagina %u (estado %s). Esperando al coordinador %u...\n",
-                       miIdx, nombre_estado(st), id_coord);
-            }
+            stats_t despues{};
+            if (sistema_stats((int)cfg.nodo_id, &despues) == OK &&
+                despues.paginas_enviadas > antes.paginas_enviadas)
+                break;
+            dormir_ms(100);
         }
-        if (publicado)
-        {
-            g_fase = FASE_ESPERA;
-            // Esperar a que el coordinador haga PAGE_REQUEST (paginas_enviadas >= 1).
-            while (g_continuar && nodo_vivo(id_coord))
-            {
-                stats_t s;
-                if (sistema_stats((int)cfg.nodo_id, &s) == OK && s.paginas_enviadas >= 1)
-                    break;
-                dormir_ms(200);
-            }
-            page_state_t st;
-            if (sistema_page_get_state(miIdx, &st) == OK)
-                printf("[MSI] Tras ser leida por el coordinador, la pagina %u paso a %s.\n", miIdx, nombre_estado(st));
-            // Ciclo MSI completo: invalidar la copia remota y recuperar escritura.
-            status_t r = sistema_red_invalidar_copia(id_coord, miIdx);
-            printf("[MSI] INVALIDATE enviado al coordinador: %s\n", r == OK ? "copia invalidada" : "fallo");
-            if (r == OK && sistema_page_set_state(miIdx, PAGE_MODIFIED) == OK &&
-                sistema_page_get_state(miIdx, &st) == OK)
-                printf("[MSI] Sin copias remotas, la pagina %u vuelve a %s (escritura exclusiva).\n", miIdx,
-                       nombre_estado(st));
-        }
-        else if (g_continuar)
-            printf("[BUZON] No se pudo publicar el resumen.\n");
+
         reporte_memoria("final (trabajador)", cfg, npag);
     }
     else
@@ -991,36 +985,32 @@ int main(int argc, char **argv)
         {
             if (i == miIdx)
                 continue;
-            long intentos = 0;
-            while (g_continuar)
+            const double limite = ahora() + std::max(20, op.esperar);
+            while (g_continuar && ahora() < limite)
             {
-                if (!nodo_vivo(cfg.nodos[i].id) && intentos > 0)
+                if (!nodo_vivo(cfg.nodos[i].id))
                 {
-                    printf("[BUZON] Nodo %u desconectado; se omite su resultado.\n", cfg.nodos[i].id);
-                    break;
+                    dormir_ms(200);
+                    continue;
                 }
-                status_t r = sistema_red_pedir_pagina(cfg.nodos[i].id, i);
-                intentos++;
-                if (r == OK)
+                // La lectura de la pagina INVALID activa PAGE_REQUEST via SIGSEGV.
+                // Una publicacion posterior invalida automaticamente la copia SHARED.
+                memcpy(&todos[i], buzon[i], sizeof(Resumen));
+                if (todos[i].magic == RESUMEN_MAGIC && todos[i].nodo == cfg.nodos[i].id)
                 {
-                    page_state_t st = PAGE_INVALID;
-                    sistema_page_get_state(i, &st);
-                    memcpy(&todos[i], buzon[i], sizeof(Resumen));
-                    if (todos[i].magic == RESUMEN_MAGIC)
-                    {
-                        ok[i] = 1;
-                        printf("[BUZON] Pagina %u recibida del nodo %u por PAGE_REQUEST (ahora %s aqui).\n", i,
-                               cfg.nodos[i].id, nombre_estado(st));
-                    }
+                    ok[i] = 1;
+                    printf("[BUZON] Resumen del nodo %u recuperado mediante memoria DSM.\n", cfg.nodos[i].id);
                     break;
                 }
                 if (ahora() - ultimo_aviso > 5)
                 {
-                    printf("[BUZON] Esperando resultados del nodo %u (aun procesando)...\n", cfg.nodos[i].id);
+                    printf("[BUZON] Esperando resultados del nodo %u...\n", cfg.nodos[i].id);
                     ultimo_aviso = ahora();
                 }
-                dormir_ms(500);
+                dormir_ms(200);
             }
+            if (!ok[i])
+                printf("[BUZON] No se obtuvo el resultado del nodo %u.\n", cfg.nodos[i].id);
         }
 
         // ---- reporte global ----
@@ -1071,7 +1061,6 @@ int main(int argc, char **argv)
                 printf("  pagina %u=%s", i, nombre_estado(st));
         }
         printf("\n");
-        dormir_ms(800); // dejar que los trabajadores envien su INVALIDATE
         reporte_memoria("final (coordinador)", cfg, npag);
         printf("Tabla de paginas completa: use sistema_print_page_table() o el cliente 'tabla' del nodo.\n");
     }

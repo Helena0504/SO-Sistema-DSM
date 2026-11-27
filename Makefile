@@ -140,3 +140,8 @@ test-huffman-cluster:
 	python3 pruebas/test_huffman_cluster.py
 
 -include sistema/app/huffman/huffman_cluster.mk
+
+# Image Filter Engine: dos nodos y recuperacion remota automatica.
+.PHONY: test-image-filter-cluster
+test-image-filter-cluster: build/app1
+	python3 pruebas/test_image_filter_cluster.py
