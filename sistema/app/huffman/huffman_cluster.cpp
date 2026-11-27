@@ -249,7 +249,8 @@ int main(int argc, char **argv)
     int resultado = 0;
     if (conf.nodo_id != origen) {
         for (uint32_t i = 0; i < kPages; ++i) {
-            if (sistema_page_set_state(i, PAGE_INVALID) != OK) {
+            if (sistema_page_set_state(i, PAGE_INVALID) != OK ||
+                sistema_page_registrar_origen(i, origen) != OK) {
                 std::cerr << "Fallo al preparar pagina remota " << i << ".\n";
                 resultado = 1;
                 break;

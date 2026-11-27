@@ -1113,6 +1113,17 @@ status_t sistema_page_set_state( uint32_t pagina_id, page_state_t nuevo_estado)
 }
 
 
+status_t sistema_page_registrar_origen(uint32_t pagina_id, uint32_t nodo_origen)
+{
+    REQUIERE_INIT();
+    pthread_mutex_lock(&mutex_api);
+    pager_resultado_t r = pager_registrar_origen(&estado_local, pagina_id,
+                                                 nodo_origen);
+    pthread_mutex_unlock(&mutex_api);
+    FALLO(convertir_error_pager(r));
+}
+
+
 // CONSULTAR ESTADO MSI DE UNA PAGINA
 
 status_t sistema_page_get_state( uint32_t pagina_id, page_state_t *estado)

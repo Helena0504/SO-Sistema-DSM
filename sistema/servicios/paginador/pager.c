@@ -110,6 +110,25 @@ pager_resultado_t pager_consultar_estado(const dsm_estado_t *estado,
     return PAGER_OK;
 }
 
+pager_resultado_t pager_registrar_origen(dsm_estado_t *estado,
+                                        uint32_t pagina_id,
+                                        uint32_t nodo_origen)
+{
+    if (estado == NULL || estado->tabla_paginas == NULL ||
+        pagina_id >= estado->numero_paginas ||
+        nodo_origen >= DSM_MAX_NODOS || nodo_origen == estado->nodo_id) {
+        return PAGER_ERROR_PARAMETROS;
+    }
+    dsm_pagina_t *pagina = &estado->tabla_paginas[pagina_id];
+    if (!pagina->ocupada || pagina->estado_msi != DSM_INVALID) {
+        return PAGER_ERROR_SIN_DATOS;
+    }
+    pagina->nodo_origen = nodo_origen;
+    pagina->nodo_exclusivo = DSM_NODO_SIN_EXCLUSIVIDAD;
+    pagina->nodos_con_copia &= ~(UINT64_C(1) << estado->nodo_id);
+    return PAGER_OK;
+}
+
 /* SIGSEGV se configura una sola vez por proceso. No se deben liberar
    las tablas ni las reservas mientras este manejador siga instalado. */
 static dsm_estado_t *estado_fallos = NULL;

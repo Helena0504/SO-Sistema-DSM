@@ -218,8 +218,9 @@ int main(int argc, char **argv)
     if (config.nodo_id == dueno) {
         snprintf(pagina, config.pageSize, "Pagina inicial del nodo %u (%s)",
                  dueno, config.ip_local);
-    } else if (sistema_page_set_state(0, PAGE_INVALID) != OK) {
-        fputs("No se pudo invalidar la pagina local.\n", stderr);
+    } else if (sistema_page_set_state(0, PAGE_INVALID) != OK ||
+               sistema_page_registrar_origen(0, dueno) != OK) {
+        fputs("No se pudo registrar el origen remoto de la pagina.\n", stderr);
         sistema_finalize();
         return 1;
     }

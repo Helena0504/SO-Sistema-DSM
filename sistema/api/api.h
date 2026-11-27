@@ -139,6 +139,9 @@ status_t sistema_page_set_state(
 );
 
 /* Consulta el estado MSI de una pagina local. */
+/* Indica el origen de una pagina que ya se marco INVALID. */
+status_t sistema_page_registrar_origen(uint32_t pagina_id, uint32_t nodo_origen);
+
 status_t sistema_page_get_state(
     uint32_t pagina_id,
     page_state_t *estado

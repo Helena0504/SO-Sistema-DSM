@@ -50,6 +50,7 @@ int main(void)
         char *p = sistema_alloc(4096);
         assert(p != NULL);
         assert(sistema_page_set_state(0, PAGE_INVALID) == OK);
+        assert(sistema_page_registrar_origen(0, 0) == OK);
         assert(sistema_red_iniciar() == OK);
         escuchar(a[0], 'R');
         assert(sistema_red_unirse("127.0.0.1", 28041) == OK);
