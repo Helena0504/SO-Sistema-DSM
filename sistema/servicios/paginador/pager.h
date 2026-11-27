@@ -61,8 +61,13 @@ pager_resultado_t pager_registrar_origen(dsm_estado_t *estado,
                                         uint32_t pagina_id,
                                         uint32_t nodo_origen);
 
-/* Instala SIGSEGV para una sola instancia DSM en este proceso.
-   Por ahora solo recupera escrituras en paginas SHARED sin copias remotas. */
+/* El callback se ejecuta desde un hilo normal, nunca desde SIGSEGV. */
+typedef int (*pager_resolver_remoto_t)(void *contexto, uint32_t pagina_id,
+                                      dsm_msi_t acceso_previo);
+void pager_fallos_configurar_resolucion(pager_resolver_remoto_t resolver,
+                                       void *contexto);
+
+/* Instala SIGSEGV y un hilo que resuelve los fallos de acceso. */
 pager_resultado_t pager_fallos_instalar(dsm_estado_t *estado);
 
 /* Recupera el manejador que estaba instalado antes del DSM. */
