@@ -23,8 +23,8 @@ static void terminar(int senal)
 
 static void ayuda(void)
 {
-    puts("Comandos: nodos | pagina | leer | tabla | stats | pedir ID | invalidar ID");
-    puts("          modificar | escribir TEXTO | ayuda | salir");
+    puts("Comandos: nodos | pagina | leer | tabla | tabla ID | tabla global | stats | stats global");
+    puts("          pedir ID | invalidar ID | modificar | escribir TEXTO | ayuda | salir");
     puts("Las paginas remotas se recuperan automaticamente al leerlas.");
     puts("Las escrituras invalidan las copias compartidas cuando corresponde.");
 }
@@ -139,6 +139,26 @@ static void ejecutar(const char *linea, const config_t *conf, char *pagina)
         mostrar_pagina(pagina);
     } else if (strcmp(linea, "tabla") == 0) {
         sistema_print_page_table((int)conf->nodo_id);
+    } else if (strcmp(linea, "tabla global") == 0) {
+        sistema_print_global_page_table();
+    } else if (strncmp(linea, "tabla ", 6) == 0) {
+        uint32_t id;
+        if (leer_id(linea + 6, &id) == 0)
+            sistema_print_page_table((int)id);
+        else puts("Uso: tabla ID | tabla global");
+    } else if (strcmp(linea, "stats global") == 0) {
+        stats_t total;
+        uint32_t consultados;
+        if (sistema_stats_global(&total, &consultados) == OK) {
+            printf("Nodos consultados: %u\n", consultados);
+            printf("Memoria total: %zu, usada: %zu, libre: %zu bytes\n",
+                   total.mem_total, total.mem_usada,
+                   total.mem_total - total.mem_usada);
+            printf("Fallos: %llu, paginas enviadas: %llu, recibidas: %llu\n",
+                   (unsigned long long)total.faults_pagina,
+                   (unsigned long long)total.paginas_enviadas,
+                   (unsigned long long)total.paginas_recibidas);
+        } else puts("No se pudieron consultar las estadisticas globales.");
     } else if (strcmp(linea, "stats") == 0) {
         stats_t s;
         if (sistema_stats((int)conf->nodo_id, &s) == OK) {
@@ -219,12 +239,12 @@ int main(int argc, char **argv)
         sistema_finalize();
         return 1;
     }
-    uint32_t dueno = config.nodos[0].id;
-    if (config.nodo_id == dueno) {
+    uint32_t nodo_origen = config.nodos[0].id;
+    if (config.nodo_id == nodo_origen) {
         snprintf(pagina, config.pageSize, "Pagina inicial del nodo %u (%s)",
-                 dueno, config.ip_local);
+                 nodo_origen, config.ip_local);
     } else if (sistema_page_set_state(0, PAGE_INVALID) != OK ||
-               sistema_page_registrar_origen(0, dueno) != OK) {
+               sistema_page_registrar_origen(0, nodo_origen) != OK) {
         fputs("No se pudo registrar el origen remoto de la pagina.\n", stderr);
         sistema_finalize();
         return 1;
@@ -235,15 +255,16 @@ int main(int argc, char **argv)
         return 1;
     }
     if (http_iniciar(&config) != 0) {
-        fputs("No se pudo iniciar el servidor HTTP en el puerto 28005.\n", stderr);
+        fputs("No se pudo iniciar el servidor HTTP.\n", stderr);
         sistema_finalize();
         return 1;
     }
 
     printf("DSM iniciado: nodo %u, IP %s, %u nodos configurados\n",
            config.nodo_id, config.ip_local, config.cantidad_nodos);
-    printf("Puerto de nodos: %u; de paginas: %u\n",
-           config.puertoNodos, config.puertoPages);
+    printf("Puerto de nodos: %u; de paginas: %u; monitor HTTP: %u\n",
+           config.puertoNodos, config.puertoPages,
+           (unsigned)config.puertoBase + 5u);
     ayuda();
 
     pthread_t mantenimiento;

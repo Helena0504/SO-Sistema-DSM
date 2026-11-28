@@ -213,6 +213,20 @@ typedef struct PROTOCOL_PACKED {
 } msg_page_data_t;
 
 
+/* Registro de una pagina ocupada usado en QUERY_PAGES.
+   Todos los enteros de varios bytes viajan en orden de red. */
+typedef struct PROTOCOL_PACKED {
+    uint32_t pagina;
+    uint32_t nodo_origen;
+    uint32_t nodo_respaldo;
+    uint32_t nodo_exclusivo;
+    uint32_t version;
+    uint8_t estado_msi;
+    uint8_t reservado[3];
+    uint64_t proceso_id;
+    uint64_t nodos_con_copia;
+} msg_pagina_consulta_t;
+
 // id de pagina a invalidar
 typedef struct PROTOCOL_PACKED {
     uint32_t pagina;
@@ -248,6 +262,7 @@ _Static_assert(sizeof(msg_node_list_t)    == 4,  "msg_node_list_t cambio de tama
 _Static_assert(sizeof(msg_heartbeat_t)    == 16, "msg_heartbeat_t cambio de tamanno");
 _Static_assert(sizeof(msg_page_request_t) == 8,  "msg_page_request_t cambio de tamanno");
 _Static_assert(sizeof(msg_page_data_t)    == 12, "msg_page_data_t cambio de tamanno");
+_Static_assert(sizeof(msg_pagina_consulta_t) == 40, "msg_pagina_consulta_t cambio de tamanno");
 _Static_assert(sizeof(msg_invalidate_t)   == 4,  "msg_invalidate_t cambio de tamanno");
 _Static_assert(sizeof(msg_memoria_t)      == 20, "msg_memoria_t cambio de tamanno");
 _Static_assert(sizeof(msg_sync_t)         == 4,  "msg_sync_t cambio de tamanno");

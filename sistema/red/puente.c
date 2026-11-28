@@ -405,18 +405,75 @@ static int atender_consultas(int fd, const red_mensaje_t *msg, void *ctx)
 {
     puente_t *p = ctx;
     if (!mensaje_para_mi(p, msg) || !emisor_conocido(p, msg->origen) ||
-        msg->tipo != QUERY_STATS || msg->longitud != 0) {
+        msg->longitud != 0) {
         return responder_error(fd, msg, p, PROTOCOL_ERROR_TIPO_INVALIDO);
     }
-    stats_snapshot_t snap;
-    uint8_t buffer[STATS_SERIAL_BYTES];
-    if (stats_obtener(&snap) != STATS_OK ||
-        stats_serializar(&snap, buffer, sizeof(buffer)) != STATS_OK) {
-        return responder_error(fd, msg, p, PROTOCOL_ERROR_INTERNO);
+    if (msg->tipo == QUERY_STATS) {
+        stats_snapshot_t snap;
+        uint8_t buffer[STATS_SERIAL_BYTES];
+        if (stats_obtener(&snap) != STATS_OK ||
+            stats_serializar(&snap, buffer, sizeof(buffer)) != STATS_OK) {
+            return responder_error(fd, msg, p, PROTOCOL_ERROR_INTERNO);
+        }
+        red_responder(fd, msg, QUERY_REPLY, (uint16_t)p->estado->nodo_id,
+                      buffer, sizeof(buffer));
+        return 1;
     }
-    red_responder(fd, msg, QUERY_REPLY, (uint16_t)p->estado->nodo_id,
-                  buffer, sizeof(buffer));
-    return 1;
+    if (msg->tipo == QUERY_NODES) {
+        dsm_nodo_t local;
+        if (nodos_obtener(p->estado, p->estado->nodo_id, &local) != NODOS_OK)
+            return responder_error(fd, msg, p, PROTOCOL_ERROR_INTERNO);
+        local.memoria_total = p->estado->memoria_total;
+        local.memoria_libre = p->estado->memoria_libre;
+        msg_nodo_info_t datos;
+        preparar_nodo(&local, &datos);
+        red_responder(fd, msg, QUERY_REPLY, (uint16_t)p->estado->nodo_id,
+                      &datos, sizeof(datos));
+        return 1;
+    }
+    if (msg->tipo == QUERY_PAGES) {
+        /* Se envia un contador seguido de registros de longitud fija. */
+        pthread_mutex_lock(&p->mutex);
+        size_t ocupadas = 0;
+        for (uint32_t i = 0; i < p->estado->numero_paginas; ++i)
+            if (p->estado->tabla_paginas[i].ocupada) ++ocupadas;
+        if (ocupadas > (PROTOCOL_MAX_MENSAJE - sizeof(uint32_t)) /
+                        sizeof(msg_pagina_consulta_t)) {
+            pthread_mutex_unlock(&p->mutex);
+            return responder_error(fd, msg, p, PROTOCOL_ERROR_SIN_ESPACIO);
+        }
+        size_t bytes = sizeof(uint32_t) +
+                       ocupadas * sizeof(msg_pagina_consulta_t);
+        uint8_t *buffer = calloc(1, bytes);
+        if (buffer == NULL) {
+            pthread_mutex_unlock(&p->mutex);
+            return responder_error(fd, msg, p, PROTOCOL_ERROR_INTERNO);
+        }
+        uint32_t cantidad = htobe32((uint32_t)ocupadas);
+        memcpy(buffer, &cantidad, sizeof(cantidad));
+        msg_pagina_consulta_t *datos = (msg_pagina_consulta_t *)(void *)
+                                      (buffer + sizeof(uint32_t));
+        size_t indice = 0;
+        for (uint32_t i = 0; i < p->estado->numero_paginas; ++i) {
+            const dsm_pagina_t *pagina = &p->estado->tabla_paginas[i];
+            if (!pagina->ocupada) continue;
+            msg_pagina_consulta_t *r = &datos[indice++];
+            r->pagina = htobe32(pagina->pagina_id);
+            r->nodo_origen = htobe32(pagina->nodo_origen);
+            r->nodo_respaldo = htobe32(pagina->nodo_respaldo);
+            r->nodo_exclusivo = htobe32(pagina->nodo_exclusivo);
+            r->version = htobe32(pagina->version);
+            r->estado_msi = pagina->estado_msi;
+            r->proceso_id = htobe64(pagina->proceso_id);
+            r->nodos_con_copia = htobe64(pagina->nodos_con_copia);
+        }
+        pthread_mutex_unlock(&p->mutex);
+        red_responder(fd, msg, QUERY_REPLY, (uint16_t)p->estado->nodo_id,
+                      buffer, (uint32_t)bytes);
+        free(buffer);
+        return 1;
+    }
+    return responder_error(fd, msg, p, PROTOCOL_ERROR_TIPO_INVALIDO);
 }
 
 puente_resultado_t puente_iniciar(puente_t *p, dsm_estado_t *estado,
@@ -940,4 +997,95 @@ puente_resultado_t puente_barrera_global(puente_t *p)
         if (tiempo_monotonico_ms() >= fin) return PUENTE_ERROR_OCUPADO;
         pausa_sincronizacion();
     }
+}
+
+/* El puerto de consultas puede diferir entre instancias en una misma IP.
+   En la configuracion ambos puertos conservan el mismo desplazamiento. */
+static uint16_t puerto_consultas_remoto(const puente_t *p, const dsm_nodo_t *n)
+{
+    int diferencia = (int)p->config.puertoConsulta -
+                     (int)p->config.puertoNodos;
+    int puerto = (int)n->puerto_nodos + diferencia;
+    return puerto > 0 && puerto <= UINT16_MAX ? (uint16_t)puerto : 0;
+}
+
+static puente_resultado_t consulta_remota(puente_t *p, uint32_t nodo,
+                              uint8_t tipo, red_mensaje_t *respuesta)
+{
+    dsm_nodo_t remoto;
+    if (respuesta == NULL || buscar_remoto(p, nodo, &remoto) != PUENTE_OK)
+        return PUENTE_ERROR_NODO;
+    uint16_t puerto = puerto_consultas_remoto(p, &remoto);
+    if (!puerto) return PUENTE_ERROR_PARAMETROS;
+    red_resultado_t resultado = red_solicitar(remoto.ip, puerto,
+        tipo, (uint16_t)p->estado->nodo_id, (uint16_t)nodo,
+        NULL, 0, respuesta, RED_TIMEOUT_LE_MS);
+    if (resultado != RED_OK) return PUENTE_ERROR_RED;
+    if (!respuesta_valida(respuesta, QUERY_REPLY, nodo, p->estado->nodo_id)) {
+        red_mensaje_liberar(respuesta);
+        return PUENTE_ERROR_RESPUESTA;
+    }
+    return PUENTE_OK;
+}
+
+puente_resultado_t puente_consultar_nodo(puente_t *p, uint32_t nodo,
+                                         dsm_nodo_t *info)
+{
+    if (info == NULL) return PUENTE_ERROR_PARAMETROS;
+    red_mensaje_t resp = {0};
+    puente_resultado_t r = consulta_remota(p, nodo, QUERY_NODES, &resp);
+    if (r != PUENTE_OK) return r;
+    if (resp.longitud != sizeof(msg_nodo_info_t) ||
+        !leer_nodo((const msg_nodo_info_t *)(const void *)resp.mensaje, info) ||
+        info->nodo_id != nodo) r = PUENTE_ERROR_RESPUESTA;
+    red_mensaje_liberar(&resp);
+    return r;
+}
+
+puente_resultado_t puente_consultar_paginas(puente_t *p, uint32_t nodo,
+                          dsm_pagina_t **paginas, size_t *cantidad)
+{
+    if (paginas == NULL || cantidad == NULL) return PUENTE_ERROR_PARAMETROS;
+    *paginas = NULL;
+    *cantidad = 0;
+    red_mensaje_t resp = {0};
+    puente_resultado_t r = consulta_remota(p, nodo, QUERY_PAGES, &resp);
+    if (r != PUENTE_OK) return r;
+    if (resp.longitud < sizeof(uint32_t)) {
+        r = PUENTE_ERROR_RESPUESTA;
+    } else {
+        uint32_t cuantos;
+        memcpy(&cuantos, resp.mensaje, sizeof(cuantos));
+        cuantos = be32toh(cuantos);
+        if (cuantos > (PROTOCOL_MAX_MENSAJE - sizeof(uint32_t)) /
+                      sizeof(msg_pagina_consulta_t) ||
+            resp.longitud != sizeof(uint32_t) +
+                            cuantos * sizeof(msg_pagina_consulta_t)) {
+            r = PUENTE_ERROR_RESPUESTA;
+        } else {
+            dsm_pagina_t *datos = calloc(cuantos ? cuantos : 1,
+                                         sizeof(*datos));
+            if (datos == NULL) r = PUENTE_ERROR_RED;
+            else {
+                const msg_pagina_consulta_t *orig =
+                    (const msg_pagina_consulta_t *)(const void *)
+                    (resp.mensaje + sizeof(uint32_t));
+                for (uint32_t i = 0; i < cuantos; ++i) {
+                    datos[i].pagina_id = be32toh(orig[i].pagina);
+                    datos[i].nodo_origen = be32toh(orig[i].nodo_origen);
+                    datos[i].nodo_respaldo = be32toh(orig[i].nodo_respaldo);
+                    datos[i].nodo_exclusivo = be32toh(orig[i].nodo_exclusivo);
+                    datos[i].version = be32toh(orig[i].version);
+                    datos[i].estado_msi = orig[i].estado_msi;
+                    datos[i].proceso_id = be64toh(orig[i].proceso_id);
+                    datos[i].nodos_con_copia = be64toh(orig[i].nodos_con_copia);
+                    datos[i].ocupada = 1;
+                }
+                *paginas = datos;
+                *cantidad = cuantos;
+            }
+        }
+    }
+    red_mensaje_liberar(&resp);
+    return r;
 }

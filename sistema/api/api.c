@@ -973,15 +973,26 @@ status_t sistema_stats(int node_id, stats_t *out)
             remoto.estado != DSM_NODO_CONECTADO) {
             FALLO(ERROR_NODE);
         }
-        /* En equipos distintos todos utilizan el puertoConsulta configurado.
-           Para dos nodos en localhost con puertos distintos, usar puente_consultar_stats. */
+        /* Mantener el mismo desplazamiento entre puertoNodos y
+           puertoConsulta en equipos y procesos con puertos distintos. */
+        int consulta = (int)remoto.puerto_nodos +
+                       (int)configuracion.puertoConsulta -
+                       (int)configuracion.puertoNodos;
+        if (consulta <= 0 || consulta > UINT16_MAX) FALLO(ERROR_CONFIG);
         puente_resultado_t r = puente_consultar_stats(&puente_local,
-            (uint32_t)node_id, configuracion.puertoConsulta, &snapshot);
+            (uint32_t)node_id, (uint16_t)consulta, &snapshot);
         if (r != PUENTE_OK) {
             FALLO(convertir_error_puente(r));
         }
-        total = remoto.memoria_total;
-        libre = remoto.memoria_libre;
+        dsm_nodo_t actualizado;
+        if (puente_consultar_nodo(&puente_local, (uint32_t)node_id,
+                                 &actualizado) == PUENTE_OK) {
+            total = actualizado.memoria_total;
+            libre = actualizado.memoria_libre;
+        } else {
+            total = remoto.memoria_total;
+            libre = remoto.memoria_libre;
+        }
     }
 
     memset(out, 0, sizeof(*out));
@@ -1129,52 +1140,118 @@ void sistema_print_nodes(void)
 
 // IMPRIMIR TABLA DE PAGINAS
 
+status_t sistema_consultar_paginas(int node_id, page_info_t **paginas,
+                                  size_t *cantidad)
+{
+    REQUIERE_INIT();
+    if (paginas == NULL || cantidad == NULL || node_id < 0 ||
+        (uint32_t)node_id >= DSM_MAX_NODOS) FALLO(ERROR_ARG);
+    *paginas = NULL;
+    *cantidad = 0;
+    dsm_pagina_t *copia = NULL;
+    size_t total = 0;
+    if (node_id == (int)estado_local.nodo_id) {
+        pthread_mutex_lock(&mutex_api);
+        for (uint32_t i = 0; i < estado_local.numero_paginas; ++i)
+            if (estado_local.tabla_paginas[i].ocupada) ++total;
+        copia = calloc(total ? total : 1, sizeof(*copia));
+        if (copia != NULL) {
+            size_t j = 0;
+            for (uint32_t i = 0; i < estado_local.numero_paginas; ++i)
+                if (estado_local.tabla_paginas[i].ocupada)
+                    copia[j++] = estado_local.tabla_paginas[i];
+        }
+        pthread_mutex_unlock(&mutex_api);
+        if (copia == NULL) FALLO(ERROR_MEM);
+    } else {
+        if (!red_activa) FALLO(ERROR_RED);
+        puente_resultado_t r = puente_consultar_paginas(&puente_local,
+                                    (uint32_t)node_id, &copia, &total);
+        if (r != PUENTE_OK) FALLO(convertir_error_puente(r));
+    }
+    page_info_t *resultado = calloc(total ? total : 1, sizeof(*resultado));
+    if (resultado == NULL) { free(copia); FALLO(ERROR_MEM); }
+    for (size_t i = 0; i < total; ++i) {
+        resultado[i].pagina_id = copia[i].pagina_id;
+        resultado[i].proceso_id = copia[i].proceso_id;
+        resultado[i].nodo_origen = copia[i].nodo_origen;
+        resultado[i].nodo_respaldo = copia[i].nodo_respaldo;
+        resultado[i].nodo_exclusivo = copia[i].nodo_exclusivo;
+        resultado[i].version = copia[i].version;
+        resultado[i].nodos_con_copia = copia[i].nodos_con_copia;
+        resultado[i].estado_msi = (page_state_t)copia[i].estado_msi;
+    }
+    free(copia);
+    *paginas = resultado;
+    *cantidad = total;
+    set_error(OK);
+    return OK;
+}
+
+status_t sistema_stats_global(stats_t *total, uint32_t *nodos_consultados)
+{
+    REQUIERE_INIT();
+    if (total == NULL || nodos_consultados == NULL) FALLO(ERROR_ARG);
+    memset(total, 0, sizeof(*total));
+    *nodos_consultados = 0;
+    for (uint32_t i = 0; i < DSM_MAX_NODOS; ++i) {
+        node_info_t nodo;
+        if (sistema_node_info((int)i, &nodo) != OK || !nodo.estado)
+            continue;
+        stats_t snap;
+        if (sistema_stats((int)i, &snap) != OK) continue;
+        total->faults_pagina += snap.faults_pagina;
+        total->paginas_enviadas += snap.paginas_enviadas;
+        total->paginas_recibidas += snap.paginas_recibidas;
+        total->invalidadas += snap.invalidadas;
+        total->solicitudes_memoria += snap.solicitudes_memoria;
+        total->liberaciones_memoria += snap.liberaciones_memoria;
+        total->errores_red += snap.errores_red;
+        total->bytes_enviados += snap.bytes_enviados;
+        total->bytes_recibidos += snap.bytes_recibidos;
+        total->mem_total += snap.mem_total;
+        total->mem_usada += snap.mem_usada;
+        ++*nodos_consultados;
+    }
+    if (*nodos_consultados == 0) FALLO(ERROR_STATS);
+    set_error(OK);
+    return OK;
+}
+
 void sistema_print_page_table(int node_id)
 {
-    if (!initialized) {
-        set_error(ERROR_NO_INIT);
+    page_info_t *paginas = NULL;
+    size_t cantidad = 0;
+    if (sistema_consultar_paginas(node_id, &paginas, &cantidad) != OK) {
+        printf("No se pudo consultar la tabla del nodo %d.\n", node_id);
         return;
     }
-
-    if (node_id != (int)estado_local.nodo_id) {
-
-        set_error(ERROR_NODE);
-
-        return;
+    printf("\n========== TABLA DE PAGINAS - NODO %d ==========\n", node_id);
+    printf("ID     Proceso          MSI       Origen  Respaldo  Version\n");
+    for (size_t i = 0; i < cantidad; ++i) {
+        const page_info_t *p = &paginas[i];
+        const char *estado = p->estado_msi == PAGE_SHARED ? "SHARED" :
+            (p->estado_msi == PAGE_MODIFIED ? "MODIFIED" : "INVALID");
+        printf("%-6u %-16llu %-9s %-7u %-9u %u\n",
+            p->pagina_id, (unsigned long long)p->proceso_id, estado,
+            p->nodo_origen, p->nodo_respaldo, p->version);
     }
-
-    printf("\n========== TABLA DE PAGINAS ==========\n");
-
-    for (uint32_t i = 0; i < estado_local.numero_paginas; i++) {
-
-        dsm_pagina_t *pagina = &estado_local.tabla_paginas[i];
-
-        if (!pagina->ocupada) {
-            continue;
-        }
-
-        printf("Pagina: %u\n", pagina->pagina_id);
-
-        printf("Proceso: %llu\n",
-               (unsigned long long)pagina->proceso_id);
-
-        printf("Estado MSI: %u\n", pagina->estado_msi);
-
-        printf("Nodo origen: %u\n", pagina->nodo_origen);
-
-        printf("Nodo exclusivo: %u\n", pagina->nodo_exclusivo);
-
-        printf("Version: %u\n", pagina->version);
-
-        printf("--------------------------------------\n");
-    }
-
-    printf("======================================\n");
-
+    printf("Total de paginas ocupadas: %zu\n", cantidad);
+    free(paginas);
     set_error(OK);
 }
 
-
+void sistema_print_global_page_table(void)
+{
+    if (!initialized) { set_error(ERROR_NO_INIT); return; }
+    for (uint32_t id = 0; id < DSM_MAX_NODOS; ++id) {
+        node_info_t nodo;
+        if (sistema_node_info((int)id, &nodo) != OK || !nodo.estado)
+            continue;
+        sistema_print_page_table((int)id);
+    }
+    set_error(OK);
+}
 
 /* Una reserva puede abarcar varias paginas; se registran juntas para que
    la aplicacion no tenga que invalidarlas una por una. */

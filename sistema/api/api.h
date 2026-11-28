@@ -125,9 +125,30 @@ void sistema_print_nodes(void);
 status_t sistema_stats(int node_id, stats_t *out);
 
 
+/* Resumen de una pagina ocupada. La posicion es su ID dentro de la region. */
+typedef struct {
+    uint32_t pagina_id;
+    uint64_t proceso_id;
+    uint32_t nodo_origen;
+    uint32_t nodo_respaldo;
+    uint32_t nodo_exclusivo;
+    uint32_t version;
+    uint64_t nodos_con_copia;
+    page_state_t estado_msi;
+} page_info_t;
+
+/* Devuelve solo las paginas ocupadas del nodo solicitado (local o remoto).
+   *paginas se reserva con malloc y debe liberarse con free(). */
+status_t sistema_consultar_paginas(int node_id, page_info_t **paginas,
+                                  size_t *cantidad);
+
+/* Consulta agregada de contadores y memoria de los nodos conectados. */
+status_t sistema_stats_global(stats_t *total, uint32_t *nodos_consultados);
+
 /* TABLA DE PAGINAS */
 
 void sistema_print_page_table(int node_id);
+void sistema_print_global_page_table(void);
 
 
 /* GESTION DEL PAGER */

@@ -73,6 +73,13 @@ puente_resultado_t puente_consultar_stats(puente_t *puente, uint32_t remoto,
                                          uint16_t puerto_consulta,
                                          stats_snapshot_t *salida);
 
+/* Consulta la tabla de paginas ocupadas y el estado actual de un nodo remoto.
+   La persona que llama libera *paginas con free(). */
+puente_resultado_t puente_consultar_paginas(puente_t *puente, uint32_t nodo,
+                       dsm_pagina_t **paginas, size_t *cantidad);
+puente_resultado_t puente_consultar_nodo(puente_t *puente, uint32_t nodo,
+                                         dsm_nodo_t *info);
+
 /* Aplica muertoH a los nodos remotos registrados. */
 puente_resultado_t puente_verificar_heartbeat(puente_t *puente,
                                                uint32_t *nodos_caidos);

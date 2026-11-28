@@ -14,7 +14,7 @@ MODULOS = $(ASIG) $(NODOS) $(PAGER) $(PAGER_NODOS) $(RED) $(STATS) $(CONFIG) $(L
 
 PRUEBAS = test_global test_asig test_asig_memoria test_nodos \
           test_nodos_heartbeat test_pager test_pager_fallos \
-          test_pager_nodos test_integracion test_api test_stats test_puente test_api_red test_api_fallos_red test_api_regiones_remotas test_api_reserva_distribuida test_api_msi_concurrencia test_api_msi_escalabilidad test_api_multinodo_reserva test_api_sync_global
+          test_pager_nodos test_integracion test_api test_stats test_puente test_api_red test_api_fallos_red test_api_regiones_remotas test_api_reserva_distribuida test_api_msi_concurrencia test_api_msi_escalabilidad test_api_multinodo_reserva test_api_sync_global test_api_consultas_globales
 BINARIOS = $(addprefix build/,$(PRUEBAS))
 
 HTTP = sistema/app/cluster/http.c
@@ -86,6 +86,9 @@ build/test_api_multinodo_reserva: pruebas/test_api_multinodo_reserva.c $(API) $(
 build/test_api_sync_global: pruebas/test_api_sync_global.c $(API) $(MODULOS) | build
 	$(CC) $(CFLAGS) $^ -o $@
 
+build/test_api_consultas_globales: pruebas/test_api_consultas_globales.c $(API) $(MODULOS) | build
+	$(CC) $(CFLAGS) $^ -o $@
+
 build/prototipo_local: sistema/app/demo/prototipo_local.c $(ASIG) $(NODOS) $(PAGER) $(PAGER_NODOS) | build
 	$(CC) $(CFLAGS) $^ -o $@
 
@@ -151,3 +154,8 @@ test-huffman-cluster:
 .PHONY: test-image-filter-cluster
 test-image-filter-cluster: build/app1
 	python3 pruebas/test_image_filter_cluster.py
+
+# Consulta real del monitor web local (puerto 28095 de prueba).
+.PHONY: test-monitor-http
+test-monitor-http: build/dsm_nodo
+	python3 pruebas/test_monitor_http.py
