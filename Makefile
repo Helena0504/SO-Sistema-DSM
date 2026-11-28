@@ -17,7 +17,7 @@ PRUEBAS = test_global test_asig test_asig_memoria test_nodos \
           test_pager_nodos test_integracion test_api test_stats test_puente test_api_red test_api_fallos_red test_api_regiones_remotas test_api_reserva_distribuida test_api_msi_concurrencia test_api_msi_escalabilidad test_api_multinodo_reserva test_api_sync_global test_api_consultas_globales
 BINARIOS = $(addprefix build/,$(PRUEBAS))
 
-HTTP = sistema/app/cluster/http.c
+HTTP = sistema/app/demo_cluster/http.c
 
 .PHONY: all test test-integracion test-red test-msi-escala demo cluster clean
 
@@ -115,14 +115,14 @@ clean:
 	rm -rf build
 
 # Ejecutable para correr el mismo programa en todas las computadoras.
-build/dsm_nodo: sistema/app/cluster/main.c $(HTTP) $(API) $(MODULOS) | build
+build/dsm_nodo: sistema/app/demo_cluster/main.c $(HTTP) $(API) $(MODULOS) | build
 	$(CC) $(CFLAGS) $^ -o $@
 
 cluster: build/dsm_nodo
 	./build/dsm_nodo sistema/sistema.conf
 
 # Reglas de la aplicacion Huffman
--include sistema/app/huffman/huffman.mk
+-include sistema/app/app2/huffman.mk
 	
 	
 	
@@ -144,11 +144,11 @@ app1: build/app1
 # Prueba de extremo a extremo: Huffman en dos nodos con lectura remota automatica.
 .PHONY: test-huffman-cluster
 test-huffman-cluster:
-	python3 sistema/app/huffman/preparar_cluster.py
+	python3 sistema/app/app2/preparar_cluster.py
 	$(MAKE) build/huffman_cluster
 	python3 pruebas/test_huffman_cluster.py
 
--include sistema/app/huffman/huffman_cluster.mk
+-include sistema/app/app2/huffman_cluster.mk
 
 # Image Filter Engine: dos nodos y recuperacion remota automatica.
 .PHONY: test-image-filter-cluster
