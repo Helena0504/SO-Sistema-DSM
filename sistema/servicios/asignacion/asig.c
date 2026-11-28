@@ -14,6 +14,7 @@ static void reiniciar_pagina(dsm_pagina_t *pagina,
     *pagina = (dsm_pagina_t){0};
     pagina->pagina_id = pagina_id;
     pagina->nodo_origen = nodo_id;
+    pagina->nodo_respaldo = nodo_id;
     pagina->nodo_exclusivo = DSM_NODO_SIN_EXCLUSIVIDAD;
     pagina->estado_msi = DSM_INVALID;
 }
@@ -177,17 +178,25 @@ asig_resultado_t asig_plan_mixto(const dsm_estado_t *estado, size_t bytes,
     return ASIG_OK;
 }
 
-asig_resultado_t asig_memoria_reservar_mixta(dsm_estado_t *estado,
+asig_resultado_t asig_memoria_reservar_mixta_por_nodo(dsm_estado_t *estado,
                    uint64_t proceso_id, const asig_plan_mixto_t *plan,
-                   uint32_t remoto, void **direccion)
+                   const uint32_t *nodos_origen, void **direccion)
 {
     if (direccion != NULL) *direccion = NULL;
     if (estado == NULL || plan == NULL || direccion == NULL ||
-        proceso_id == 0 || remoto >= DSM_MAX_NODOS ||
-        remoto == estado->nodo_id || plan->remotas == 0 ||
+        nodos_origen == NULL || proceso_id == 0 || plan->remotas == 0 ||
         plan->inicio + (uint64_t)plan->locales + plan->remotas >
         estado->numero_paginas) {
         return ASIG_ERROR_PARAMETROS;
+    }
+    /* Validar antes de reservar memoria o alterar metadatos. */
+    for (uint32_t i = 0; i < plan->remotas; ++i) {
+        if (nodos_origen[i] >= DSM_MAX_NODOS ||
+            nodos_origen[i] == estado->nodo_id) return ASIG_ERROR_PARAMETROS;
+    }
+    for (uint32_t i = 0; i < plan->locales + plan->remotas; ++i) {
+        if (estado->tabla_paginas[plan->inicio + i].ocupada)
+            return ASIG_ERROR_SIN_ESPACIO;
     }
     uint32_t entrada = entrada_disponible(estado);
     if (entrada == estado->numero_paginas) return ASIG_ERROR_SIN_ESPACIO;
@@ -208,23 +217,44 @@ asig_resultado_t asig_memoria_reservar_mixta(dsm_estado_t *estado,
         if (i < plan->locales) {
             p->estado_msi = DSM_MODIFIED;
             p->nodo_origen = estado->nodo_id;
+            p->nodo_respaldo = estado->nodo_id;
             p->nodo_exclusivo = estado->nodo_id;
             p->nodos_con_copia = UINT64_C(1) << estado->nodo_id;
         } else {
             p->estado_msi = DSM_INVALID;
-            p->nodo_origen = remoto;
+            p->nodo_origen = nodos_origen[i - plan->locales];
+            p->nodo_respaldo = nodos_origen[i - plan->locales];
             p->nodo_exclusivo = DSM_NODO_SIN_EXCLUSIVIDAD;
             p->nodos_con_copia = 0;
         }
     }
+    /* 64 marca una reserva mixta; los nodos_origen estan en tabla_paginas. */
     estado->tabla_asignaciones[entrada] = (dsm_asignacion_t){
         .proceso_id = proceso_id, .region_id = entrada + 1,
         .pagina_inicio = plan->inicio, .cantidad_paginas = paginas,
-        .nodo_solicitante = remoto, .base_virtual = (uintptr_t)base
+        .nodo_solicitante = DSM_MAX_NODOS, .base_virtual = (uintptr_t)base
     };
     estado->memoria_libre -= (uint64_t)plan->locales * tam;
     *direccion = base;
     return ASIG_OK;
+}
+
+/* Mantener la interfaz previa para las pruebas y usuarios existentes. */
+asig_resultado_t asig_memoria_reservar_mixta(dsm_estado_t *estado,
+                   uint64_t proceso_id, const asig_plan_mixto_t *plan,
+                   uint32_t remoto, void **direccion)
+{
+    if (plan == NULL || plan->remotas == 0 ||
+        remoto >= DSM_MAX_NODOS ||
+        (estado != NULL && remoto == estado->nodo_id))
+        return ASIG_ERROR_PARAMETROS;
+    uint32_t *nodos_origen = malloc((size_t)plan->remotas * sizeof(*nodos_origen));
+    if (nodos_origen == NULL) return ASIG_ERROR_MEMORIA;
+    for (uint32_t i = 0; i < plan->remotas; ++i) nodos_origen[i] = remoto;
+    asig_resultado_t r = asig_memoria_reservar_mixta_por_nodo(
+        estado, proceso_id, plan, nodos_origen, direccion);
+    free(nodos_origen);
+    return r;
 }
 
 asig_resultado_t asig_reservar_paginas_remotas(dsm_estado_t *estado,
@@ -253,6 +283,7 @@ asig_resultado_t asig_reservar_paginas_remotas(dsm_estado_t *estado,
         p->ocupada = 1;
         p->proceso_id = proceso_id;
         p->nodo_origen = estado->nodo_id;
+        p->nodo_respaldo = estado->nodo_id;
         p->nodo_exclusivo = estado->nodo_id;
         p->estado_msi = DSM_MODIFIED;
         p->nodos_con_copia = UINT64_C(1) << estado->nodo_id;

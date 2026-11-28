@@ -43,6 +43,10 @@ asig_resultado_t asig_plan_mixto(const dsm_estado_t *estado, size_t bytes,
 asig_resultado_t asig_memoria_reservar_mixta(dsm_estado_t *estado,
                    uint64_t proceso_id, const asig_plan_mixto_t *plan,
                    uint32_t remoto, void **direccion);
+/* Nodo de origen por pagina remota (plan->remotas elementos). */
+asig_resultado_t asig_memoria_reservar_mixta_por_nodo(dsm_estado_t *estado,
+                   uint64_t proceso_id, const asig_plan_mixto_t *plan,
+                   const uint32_t *nodos_origen, void **direccion);
 
 /* Reserva/libera almacenamiento real en el nodo que recibe MEM_REQUEST. */
 asig_resultado_t asig_reservar_paginas_remotas(dsm_estado_t *estado,

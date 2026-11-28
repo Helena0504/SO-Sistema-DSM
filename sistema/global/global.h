@@ -33,7 +33,8 @@ typedef struct {
     uint8_t estado_msi;
     uint8_t ocupada;
     uint16_t reservado;
-    uint32_t flags;
+    /* Nodo que reservo el respaldo fisico, estable frente a cambios MSI. */
+    uint32_t nodo_respaldo;
 } dsm_pagina_t;
 
 /* Informacion que cada nodo mantiene sobre los integrantes del DSM. */

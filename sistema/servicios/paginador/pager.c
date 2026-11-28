@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "pager.h"
 
@@ -9,6 +10,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <ucontext.h>
 
 /* Cada asignacion tiene su propio mmap; la pagina logica puede estar
    dentro de cualquiera de esas regiones. */
@@ -263,10 +265,25 @@ static int pagina_del_fallo(const dsm_estado_t *estado,
     return 0;
 }
 
+/* Un fallo puede ser de lectura o escritura independientemente del estado
+   MSI observado: otro hilo puede haber recuperado la pagina mientras la
+   senal estaba pendiente. En Linux x86, REG_ERR indica el tipo de acceso. */
+static int fallo_de_escritura(void *contexto)
+{
+#if defined(__linux__) && (defined(__x86_64__) || defined(__i386__)) && defined(REG_ERR)
+    const ucontext_t *uc = (const ucontext_t *)contexto;
+    return uc != NULL && (uc->uc_mcontext.gregs[REG_ERR] & 2) != 0;
+#else
+    (void)contexto;
+    /* En otras arquitecturas conservar el comportamiento anterior. */
+    return 1;
+#endif
+}
+
 static void manejar_fallo_pagina(int senal, siginfo_t *info, void *contexto)
 {
     (void)senal;
-    (void)contexto;
+    int escritura = fallo_de_escritura(contexto);
     dsm_estado_t *estado = estado_fallos;
     uint32_t pagina_id;
     void *base;
@@ -281,9 +298,17 @@ static void manejar_fallo_pagina(int senal, siginfo_t *info, void *contexto)
         int local_sin_copias = previo == DSM_SHARED &&
                 (pagina->nodos_con_copia & ~copia_local) == 0;
         int remoto = resolver_remoto != NULL &&
-                (previo == DSM_INVALID || previo == DSM_SHARED);
+                (previo == DSM_INVALID || (previo == DSM_SHARED && escritura));
 
-        if (pagina->ocupada && (local_sin_copias || remoto)) {
+        /* Una lectura pendiente sobre una pagina ya recuperada no es una
+           solicitud de escritura, aunque su estado ahora sea SHARED. */
+        if (pagina->ocupada && !escritura && previo == DSM_SHARED) {
+            return;
+        }
+        if (pagina->ocupada && previo == DSM_MODIFIED) {
+            return;
+        }
+        if (pagina->ocupada && ((escritura && local_sin_copias) || remoto)) {
             /* Una sola solicitud activa evita mezclar respuestas de hilos. */
             for (;;) {
                 sig_atomic_t esperado = 0;
@@ -295,8 +320,8 @@ static void manejar_fallo_pagina(int senal, siginfo_t *info, void *contexto)
             /* Otro hilo pudo resolver la pagina mientras esperabamos.
                No volver a solicitar una copia que ya esta disponible. */
             dsm_msi_t actual = (dsm_msi_t)pagina->estado_msi;
-            if ((previo == DSM_INVALID && actual != DSM_INVALID) ||
-                (previo == DSM_SHARED && actual == DSM_MODIFIED)) {
+            if (actual == DSM_MODIFIED ||
+                (!escritura && actual == DSM_SHARED)) {
                 __atomic_store_n(&fallo_pendiente, 0, __ATOMIC_RELEASE);
                 return;
             }

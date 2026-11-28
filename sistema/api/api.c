@@ -16,6 +16,7 @@
 #include "../red/puente.h"
 
 #include <pthread.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -265,9 +266,9 @@ status_t sistema_init(const char *config_path)
 
     /* Los IDs de las paginas compartidas pueden superar la capacidad local.
        Solo se amplia la tabla logica, no la memoria aportada. */
-    uint32_t participantes = configuracion.cantidad_nodos;
-    if (participantes < 2) participantes = 2;
-    uint64_t max_id = (uint64_t)estado_local.numero_paginas * participantes;
+    /* La tabla virtual debe admitir nodos que se unan despues del init.
+       Reservar metadatos para el maximo no compromete memoria fisica. */
+    uint64_t max_id = (uint64_t)estado_local.numero_paginas * DSM_MAX_NODOS;
     if (max_id > UINT32_MAX ||
         asig_tabla_ampliar(&estado_local, (uint32_t)max_id) != ASIG_OK) {
         asig_tabla_liberar(&estado_local);
@@ -514,109 +515,134 @@ status_t sistema_red_detener(void)
 // RESERVAR MEMORIA
 
 
+/* Los segmentos remotos son contiguos, pero pueden tener distintos nodos
+   de respaldo. Cada solicitud MEM_REQUEST debe tener su MEM_FREE simetrico. */
+typedef struct {
+    uint32_t nodo;
+    uint32_t inicio;
+    uint32_t paginas;
+} tramo_remoto_t;
+
+/* Revertir reservas aceptadas cuando no alcanza el conjunto de nodos. */
+static void revertir_tramos(uint64_t proceso_id,
+                          const tramo_remoto_t *tramos, uint32_t cantidad)
+{
+    for (uint32_t i = 0; i < cantidad; ++i) {
+        (void)puente_liberar_memoria(&puente_local, tramos[i].nodo,
+             proceso_id, tramos[i].inicio, tramos[i].paginas);
+    }
+}
+
+/* Las paginas mantienen su nodo de respaldo aun despues de recuperar
+   o modificar una copia. Agrupar paginas contiguas por origen. */
+static int liberar_respaldo_remoto(const dsm_asignacion_t *asignacion)
+{
+    uint32_t fisicas = (uint32_t)(estado_local.memoria_total /
+                                   estado_local.tamano_pagina);
+    uint32_t fin = asignacion->pagina_inicio + asignacion->cantidad_paginas;
+    uint32_t i = asignacion->pagina_inicio > fisicas
+                 ? asignacion->pagina_inicio : fisicas;
+    while (i < fin) {
+        uint32_t nodo = estado_local.tabla_paginas[i].nodo_respaldo;
+        uint32_t inicio = i;
+        while (i < fin && estado_local.tabla_paginas[i].nodo_respaldo == nodo)
+            ++i;
+        if (nodo == estado_local.nodo_id || nodo >= DSM_MAX_NODOS ||
+            puente_liberar_memoria(&puente_local, nodo,
+               asignacion->proceso_id, inicio, i - inicio) != PUENTE_OK)
+            return -1;
+    }
+    return 0;
+}
+
 void *sistema_alloc(size_t size)
 {
     if (!initialized) {
         set_error(ERROR_NO_INIT);
         return NULL;
     }
-
     if (size == 0) {
         set_error(ERROR_ARG);
         return NULL;
     }
 
     pthread_mutex_lock(&mutex_api);
-
     void *puntero = NULL;
-
-    uint64_t proceso_id = (uint64_t)getpid();
-
+    /* PID solo no identifica globalmente a un proceso entre computadoras. */
+    uint64_t proceso_id = ((uint64_t)estado_local.nodo_id + 1u) << 32;
+    proceso_id |= (uint32_t)getpid();
     asig_resultado_t resultado =
         asig_memoria_reservar(&estado_local, proceso_id, size, &puntero);
 
     if (resultado == ASIG_ERROR_SIN_ESPACIO && red_activa) {
         asig_plan_mixto_t plan;
         if (asig_plan_mixto(&estado_local, size, &plan) == ASIG_OK) {
-            uint32_t inicio_remoto = plan.inicio + plan.locales;
-            for (uint32_t id = 0; id < DSM_MAX_NODOS; ++id) {
-                if (id == estado_local.nodo_id) continue;
-                dsm_nodo_t remoto;
-                if (nodos_obtener(&estado_local, id, &remoto) != NODOS_OK ||
-                    remoto.estado != DSM_NODO_CONECTADO) continue;
-                if (puente_reservar_memoria(&puente_local, id, proceso_id,
-                                            inicio_remoto, plan.remotas) != PUENTE_OK) {
-                    continue;
+            uint32_t *nodos_origen = calloc(plan.remotas, sizeof(*nodos_origen));
+            tramo_remoto_t tramos[DSM_MAX_NODOS] = {{0}};
+            uint32_t tramos_usados = 0;
+            uint32_t restantes = plan.remotas;
+            uint32_t pagina = plan.inicio + plan.locales;
+            if (nodos_origen != NULL) {
+                for (uint32_t id = 0; id < DSM_MAX_NODOS && restantes; ++id) {
+                    if (id == estado_local.nodo_id) continue;
+                    dsm_nodo_t remoto;
+                    if (nodos_obtener(&estado_local, id, &remoto) != NODOS_OK ||
+                        remoto.estado != DSM_NODO_CONECTADO) continue;
+                    uint32_t maximo = (uint32_t)(remoto.memoria_libre /
+                                                  estado_local.tamano_pagina);
+                    if (maximo > restantes) maximo = restantes;
+                    /* Si el dato de memoria libre esta desactualizado, el
+                       servidor puede rechazar el lote; probar uno menor. */
+                    uint32_t lote = maximo;
+                    while (lote > 0 &&
+                           puente_reservar_memoria(&puente_local, id,
+                              proceso_id, pagina, lote) != PUENTE_OK) {
+                        lote /= 2;
+                    }
+                    if (lote == 0) continue;
+                    tramos[tramos_usados++] = (tramo_remoto_t){id, pagina, lote};
+                    for (uint32_t j = 0; j < lote; ++j)
+                        nodos_origen[plan.remotas - restantes + j] = id;
+                    pagina += lote;
+                    restantes -= lote;
                 }
-                resultado = asig_memoria_reservar_mixta(
-                    &estado_local, proceso_id, &plan, id, &puntero);
-                if (resultado != ASIG_OK) {
-                    (void)puente_liberar_memoria(&puente_local, id, proceso_id,
-                                                inicio_remoto, plan.remotas);
+                if (restantes == 0) {
+                    resultado = asig_memoria_reservar_mixta_por_nodo(
+                        &estado_local, proceso_id, &plan, nodos_origen, &puntero);
                 }
-                break;
+                if (resultado != ASIG_OK || restantes != 0)
+                    revertir_tramos(proceso_id, tramos, tramos_usados);
+                free(nodos_origen);
             }
         }
     }
-
     pthread_mutex_unlock(&mutex_api);
 
     if (resultado != ASIG_OK) {
-
         status_t error = convertir_error_asig(resultado);
-
         set_error(error);
-
-        logs_escribir(
-            LOG_ERROR,
-            "Error reservando %zu bytes. Codigo ASIG: %d",
-            size,
-            resultado
-        );
-
+        logs_escribir(LOG_ERROR, "Error reservando %zu bytes. Codigo ASIG: %d",
+                      size, resultado);
         return NULL;
     }
 
-    /* Registrar la solicitud de memoria */
-    stats_resultado_t resultado_stats =
-        stats_registrar(STATS_SOLICITUD_MEMORIA);
-
-    if (resultado_stats != STATS_OK) {
-
-        /* Revertir la reserva si falla el registro */
+    if (stats_registrar(STATS_SOLICITUD_MEMORIA) != STATS_OK) {
         pthread_mutex_lock(&mutex_api);
-
         for (uint32_t i = 0; i < estado_local.numero_paginas; ++i) {
             const dsm_asignacion_t *a = &estado_local.tabla_asignaciones[i];
             if (a->cantidad_paginas && a->base_virtual == (uintptr_t)puntero &&
                 a->nodo_solicitante != estado_local.nodo_id && red_activa) {
-                uint32_t fisicas = (uint32_t)(estado_local.memoria_total /
-                                               estado_local.tamano_pagina);
-                uint32_t fin = a->pagina_inicio + a->cantidad_paginas;
-                uint32_t inicio_remoto = a->pagina_inicio > fisicas
-                                        ? a->pagina_inicio : fisicas;
-                (void)puente_liberar_memoria(&puente_local, a->nodo_solicitante,
-                            a->proceso_id, inicio_remoto, fin - inicio_remoto);
+                (void)liberar_respaldo_remoto(a);
                 break;
             }
         }
-        asig_memoria_liberar(&estado_local, puntero);
-
+        (void)asig_memoria_liberar(&estado_local, puntero);
         pthread_mutex_unlock(&mutex_api);
-
         set_error(ERROR_STATS);
-
         return NULL;
     }
-
-    logs_escribir(
-        LOG_INFO,
-        "Reserva de %zu bytes realizada correctamente",
-        size
-    );
-
+    logs_escribir(LOG_INFO, "Reserva de %zu bytes realizada correctamente", size);
     set_error(OK);
-
     return puntero;
 }
 
@@ -723,20 +749,12 @@ status_t sistema_free(void *puntero)
 
     pthread_mutex_lock(&mutex_api);
 
-    /* Liberar primero el respaldo remoto y luego desmapear la region local. */
+    /* Liberar los tramos de cada nodo antes de desmapear la region. */
     for (uint32_t i = 0; i < estado_local.numero_paginas; ++i) {
         const dsm_asignacion_t *a = &estado_local.tabla_asignaciones[i];
         if (a->cantidad_paginas && a->base_virtual == (uintptr_t)puntero &&
             a->nodo_solicitante != estado_local.nodo_id) {
-            uint32_t fisicas = (uint32_t)(estado_local.memoria_total /
-                                           estado_local.tamano_pagina);
-            uint32_t fin = a->pagina_inicio + a->cantidad_paginas;
-            uint32_t inicio_remoto = a->pagina_inicio > fisicas
-                                    ? a->pagina_inicio : fisicas;
-            if (!red_activa || fin <= inicio_remoto ||
-                puente_liberar_memoria(&puente_local, a->nodo_solicitante,
-                            a->proceso_id, inicio_remoto,
-                            fin - inicio_remoto) != PUENTE_OK) {
+            if (!red_activa || liberar_respaldo_remoto(a) != 0) {
                 pthread_mutex_unlock(&mutex_api);
                 FALLO(ERROR_RED);
             }
