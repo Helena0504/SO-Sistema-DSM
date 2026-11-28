@@ -225,7 +225,13 @@ int http_iniciar(const config_t *config)
     setsockopt(servidor, SOL_SOCKET, SO_REUSEADDR,
                &reutilizar, sizeof(reutilizar));
     direccion.sin_family = AF_INET;
-    direccion.sin_addr.s_addr = htonl(INADDR_ANY);
+    /* Escuchar en la IP del nodo evita conflictos con otras instancias
+       que utilicen el mismo puerto en el equipo. */
+    if (inet_pton(AF_INET, config->ip_local, &direccion.sin_addr) != 1) {
+        close(servidor);
+        servidor = -1;
+        return -1;
+    }
     direccion.sin_port = htons((uint16_t)(config->puertoBase + 5u));
     if (bind(servidor, (struct sockaddr *)&direccion,
              sizeof(direccion)) < 0 || listen(servidor, 16) < 0) {

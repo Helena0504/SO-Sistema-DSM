@@ -197,13 +197,13 @@ static void ejecutar(const char *linea, const config_t *conf, char *pagina)
         status_t r = sistema_page_set_state(0, PAGE_MODIFIED);
         printf("Cambio a MODIFIED: %s (codigo %d)\n",
                r == OK ? "correcto" : "denegado", (int)r);
-    } else if (strncmp(linea, "escribir ", 8) == 0) {
+    } else if (strncmp(linea, "escribir ", 9) == 0) {
         page_state_t e;
         if (conf->nodo_id != conf->nodos[0].id ||
             sistema_page_get_state(0, &e) != OK || e == PAGE_INVALID) {
             puts("Solo el nodo origen puede escribir una pagina valida.");
         } else {
-            snprintf(pagina, conf->pageSize, "%s", linea + 8);
+            snprintf(pagina, conf->pageSize, "%s", linea + 9);
             puts("Contenido actualizado.");
         }
     } else if (strcmp(linea, "salir") == 0) {

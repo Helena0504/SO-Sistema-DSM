@@ -4,6 +4,7 @@ extern "C" {
 #include "../../global/config.h"
 }
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -59,9 +60,21 @@ bool escribir_archivo(const std::string &ruta, const unsigned char *datos,
 {
     std::ofstream f(ruta, std::ios::binary | std::ios::trunc);
     if (!f) return false;
-    if (tam != 0) f.write(reinterpret_cast<const char *>(datos),
-                           static_cast<std::streamsize>(tam));
-    return bool(f);
+    /* El write del sistema puede devolver EFAULT si la pagina DSM todavia
+       es INVALID. Copiar primero en espacio de usuario activa SIGSEGV. */
+    unsigned char bloque[4096];
+    size_t copiados = 0;
+    while (copiados < tam) {
+        uintptr_t direccion = reinterpret_cast<uintptr_t>(datos + copiados);
+        size_t restante_pagina = sizeof(bloque) - direccion % sizeof(bloque);
+        size_t cantidad = std::min(tam - copiados, restante_pagina);
+        std::memcpy(bloque, datos + copiados, cantidad);
+        f.write(reinterpret_cast<const char *>(bloque),
+                static_cast<std::streamsize>(cantidad));
+        if (!f) return false;
+        copiados += cantidad;
+    }
+    return true;
 }
 
 std::string ruta_codigos(const std::string &archivo)
