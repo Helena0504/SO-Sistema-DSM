@@ -5,6 +5,7 @@
 #include "../global/config.h"
 #include "../global/global.h"
 #include "../servicios/estadisticas/stats.h"
+#include <semaphore.h>
 
 /* Conecta los mensajes TCP con las tablas locales del DSM. */
 typedef enum {
@@ -14,8 +15,11 @@ typedef enum {
     PUENTE_ERROR_NODO = -3,
     PUENTE_ERROR_PAGINA = -4,
     PUENTE_ERROR_RESPUESTA = -5,
-    PUENTE_ERROR_INICIADO = -6
+    PUENTE_ERROR_INICIADO = -6,
+    PUENTE_ERROR_OCUPADO = -7
 } puente_resultado_t;
+
+#define PUENTE_MAX_LOCKS 256
 
 typedef struct {
     dsm_estado_t *estado;
@@ -25,6 +29,13 @@ typedef struct {
     red_servidor_t servidor_paginas;
     red_servidor_t servidor_consultas;
     pthread_mutex_t mutex;
+    /* El nodo 0 arbitra los locks, usando semaforos POSIX. */
+    pthread_mutex_t mutex_sincronizacion;
+    sem_t locks_central[PUENTE_MAX_LOCKS];
+    uint32_t propietario_lock[PUENTE_MAX_LOCKS];
+    uint32_t generacion_barrera;
+    uint32_t generacion_local;
+    uint64_t llegadas_barrera;
     int iniciado;
 } puente_t;
 
@@ -51,6 +62,11 @@ puente_resultado_t puente_reservar_memoria(puente_t *puente, uint32_t nodo,
                        uint64_t proceso_id, uint32_t inicio, uint32_t paginas);
 puente_resultado_t puente_liberar_memoria(puente_t *puente, uint32_t nodo,
                        uint64_t proceso_id, uint32_t inicio, uint32_t paginas);
+
+/* Sincronizacion global coordinada por el nodo 0. */
+puente_resultado_t puente_lock_global(puente_t *puente, uint32_t lock_id);
+puente_resultado_t puente_unlock_global(puente_t *puente, uint32_t lock_id);
+puente_resultado_t puente_barrera_global(puente_t *puente);
 
 /* Solicita contadores al otro nodo mediante QUERY_STATS. */
 puente_resultado_t puente_consultar_stats(puente_t *puente, uint32_t remoto,

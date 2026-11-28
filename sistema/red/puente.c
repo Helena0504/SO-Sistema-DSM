@@ -6,6 +6,8 @@
 #include "../servicios/estadisticas/stats.h"
 
 #include <endian.h>
+#include <errno.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -96,9 +98,97 @@ static int responder_ok(int fd, const red_mensaje_t *msg,
     return 1;
 }
 
+
+/* Los locks y la barrera se coordinan en el nodo 0. El mutex se usa
+   solamente para los metadatos, nunca durante operaciones de red. */
+static uint64_t mascara_nodos_conectados(puente_t *p)
+{
+    uint64_t mascara = UINT64_C(1) << p->estado->nodo_id;
+    for (uint32_t id = 0; id < DSM_MAX_NODOS; ++id) {
+        dsm_nodo_t nodo;
+        if (nodos_obtener(p->estado, id, &nodo) == NODOS_OK &&
+            nodo.estado == DSM_NODO_CONECTADO) {
+            mascara |= UINT64_C(1) << id;
+        }
+    }
+    return mascara;
+}
+
+/* Devuelve 1 cuando todos llegaron, 0 si faltan nodos y -1 si
+   el mensaje usa una generacion futura. */
+static int registrar_llegada(puente_t *p, uint32_t nodo, uint32_t generacion)
+{
+    if (nodo >= DSM_MAX_NODOS) return -1;
+    pthread_mutex_lock(&p->mutex_sincronizacion);
+    if (generacion > p->generacion_barrera) {
+        pthread_mutex_unlock(&p->mutex_sincronizacion);
+        return -1;
+    }
+    if (generacion == p->generacion_barrera) {
+        p->llegadas_barrera |= UINT64_C(1) << nodo;
+        uint64_t esperados = mascara_nodos_conectados(p);
+        if ((p->llegadas_barrera & esperados) == esperados) {
+            p->generacion_barrera++;
+            p->llegadas_barrera = 0;
+        }
+    }
+    int terminado = generacion < p->generacion_barrera;
+    pthread_mutex_unlock(&p->mutex_sincronizacion);
+    return terminado;
+}
+
+static int atender_sincronizacion(int fd, const red_mensaje_t *msg, puente_t *p)
+{
+    if (p->estado->nodo_id != 0 || !mensaje_para_mi(p, msg) ||
+        !emisor_conocido(p, msg->origen) ||
+        msg->longitud != sizeof(msg_sync_t)) {
+        return responder_error(fd, msg, p, PROTOCOL_ERROR_TIPO_INVALIDO);
+    }
+    msg_sync_t cuerpo;
+    memcpy(&cuerpo, msg->mensaje, sizeof(cuerpo));
+    uint32_t id = be32toh(cuerpo.id);
+    if (msg->tipo == BLOQUEO_TODOS) {
+        int listo = registrar_llegada(p, msg->origen, id);
+        if (listo < 0) return responder_error(fd, msg, p, PROTOCOL_ERROR_TIPO_INVALIDO);
+        if (!listo) return responder_error(fd, msg, p, PROTOCOL_ERROR_OCUPADO);
+        red_responder(fd, msg, BLOQUEO_SUELTO, (uint16_t)p->estado->nodo_id,
+                      msg->mensaje, msg->longitud);
+        return 1;
+    }
+    if (id >= PUENTE_MAX_LOCKS) {
+        return responder_error(fd, msg, p, PROTOCOL_ERROR_TIPO_INVALIDO);
+    }
+    if (msg->tipo == LOCK_PEDIDO) {
+        pthread_mutex_lock(&p->mutex_sincronizacion);
+        int logrado = sem_trywait(&p->locks_central[id]) == 0;
+        if (logrado) p->propietario_lock[id] = msg->origen;
+        pthread_mutex_unlock(&p->mutex_sincronizacion);
+        if (!logrado) return responder_error(fd, msg, p, PROTOCOL_ERROR_OCUPADO);
+        red_responder(fd, msg, LOCK_ACEPTADO, (uint16_t)p->estado->nodo_id,
+                      msg->mensaje, msg->longitud);
+        return 1;
+    }
+    if (msg->tipo == LOCK_SUELTO) {
+        pthread_mutex_lock(&p->mutex_sincronizacion);
+        int permitido = p->propietario_lock[id] == msg->origen;
+        if (permitido) {
+            p->propietario_lock[id] = UINT32_MAX;
+            sem_post(&p->locks_central[id]);
+        }
+        pthread_mutex_unlock(&p->mutex_sincronizacion);
+        return permitido ? responder_ok(fd, msg, p) :
+               responder_error(fd, msg, p, PROTOCOL_ERROR_NO_ES_DUENO);
+    }
+    return responder_error(fd, msg, p, PROTOCOL_ERROR_TIPO_INVALIDO);
+}
+
 static int atender_nodos(int fd, const red_mensaje_t *msg, void *ctx)
 {
     puente_t *p = ctx;
+    if (msg->tipo == BLOQUEO_TODOS || msg->tipo == LOCK_PEDIDO ||
+        msg->tipo == LOCK_SUELTO) {
+        return atender_sincronizacion(fd, msg, p);
+    }
     if ((msg->tipo == MEM_REQUEST || msg->tipo == MEM_FREE) &&
         mensaje_para_mi(p, msg) && emisor_conocido(p, msg->origen) &&
         msg->longitud == sizeof(msg_memoria_t)) {
@@ -349,6 +439,21 @@ puente_resultado_t puente_iniciar(puente_t *p, dsm_estado_t *estado,
     if (pthread_mutex_init(&p->mutex, NULL) != 0) {
         return PUENTE_ERROR_RED;
     }
+    if (pthread_mutex_init(&p->mutex_sincronizacion, NULL) != 0) {
+        pthread_mutex_destroy(&p->mutex);
+        return PUENTE_ERROR_RED;
+    }
+    uint32_t creados = 0;
+    for (; creados < PUENTE_MAX_LOCKS; ++creados) {
+        if (sem_init(&p->locks_central[creados], 0, 1) != 0) break;
+        p->propietario_lock[creados] = UINT32_MAX;
+    }
+    if (creados != PUENTE_MAX_LOCKS) {
+        for (uint32_t i = 0; i < creados; ++i) sem_destroy(&p->locks_central[i]);
+        pthread_mutex_destroy(&p->mutex_sincronizacion);
+        pthread_mutex_destroy(&p->mutex);
+        return PUENTE_ERROR_RED;
+    }
 
     const char *ip = conf->ip_local;
     if (red_servidor_iniciar(&p->servidor_nodos, ip, conf->puertoNodos,
@@ -363,6 +468,9 @@ puente_resultado_t puente_iniciar(puente_t *p, dsm_estado_t *estado,
         red_servidor_detener(&p->servidor_paginas);
         red_servidor_detener(&p->servidor_heartbeat);
         red_servidor_detener(&p->servidor_nodos);
+        for (uint32_t i = 0; i < PUENTE_MAX_LOCKS; ++i)
+            sem_destroy(&p->locks_central[i]);
+        pthread_mutex_destroy(&p->mutex_sincronizacion);
         pthread_mutex_destroy(&p->mutex);
         p->estado = NULL;
         return PUENTE_ERROR_RED;
@@ -380,6 +488,9 @@ void puente_detener(puente_t *p)
     red_servidor_detener(&p->servidor_paginas);
     red_servidor_detener(&p->servidor_heartbeat);
     red_servidor_detener(&p->servidor_nodos);
+    for (uint32_t i = 0; i < PUENTE_MAX_LOCKS; ++i)
+        sem_destroy(&p->locks_central[i]);
+    pthread_mutex_destroy(&p->mutex_sincronizacion);
     pthread_mutex_destroy(&p->mutex);
     p->estado = NULL;
     p->iniciado = 0;
@@ -720,4 +831,113 @@ puente_resultado_t puente_consultar_stats(puente_t *p, uint32_t remoto,
     }
     red_mensaje_liberar(&respuesta);
     return resultado;
+}
+
+/* Peticiones al coordinador. Los errores de ocupado se reintentan sin
+   mantener mutexes ni sockets abiertos entre intentos. */
+static uint64_t tiempo_monotonico_ms(void)
+{
+    struct timespec t;
+    if (clock_gettime(CLOCK_MONOTONIC, &t) != 0) return 0;
+    return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+}
+
+static void pausa_sincronizacion(void)
+{
+    struct timespec t = {.tv_sec = 0, .tv_nsec = 20000000};
+    nanosleep(&t, NULL);
+}
+
+static puente_resultado_t consultar_coordinador(puente_t *p, uint8_t tipo,
+                                               uint8_t esperado, uint32_t id)
+{
+    dsm_nodo_t coordinador;
+    if (buscar_remoto(p, 0, &coordinador) != PUENTE_OK) return PUENTE_ERROR_NODO;
+    msg_sync_t cuerpo = {.id = htobe32(id)};
+    red_mensaje_t respuesta;
+    red_resultado_t r = red_solicitar(coordinador.ip, coordinador.puerto_nodos,
+               tipo, (uint16_t)p->estado->nodo_id, 0, &cuerpo, sizeof(cuerpo),
+               &respuesta, RED_TIMEOUT_LE_MS);
+    if (r != RED_OK) return PUENTE_ERROR_RED;
+    puente_resultado_t resultado = PUENTE_ERROR_RESPUESTA;
+    if (respuesta_valida(&respuesta, esperado, 0, p->estado->nodo_id) &&
+        respuesta.longitud == sizeof(cuerpo) &&
+        memcmp(respuesta.mensaje, &cuerpo, sizeof(cuerpo)) == 0) {
+        resultado = PUENTE_OK;
+    } else if (respuesta_valida(&respuesta, RECIBIDO, 0, p->estado->nodo_id) &&
+               respuesta.longitud == 0 && tipo == LOCK_SUELTO) {
+        resultado = PUENTE_OK;
+    } else if (respuesta.tipo == ERROR &&
+               respuesta.longitud >= sizeof(uint32_t)) {
+        uint32_t codigo;
+        memcpy(&codigo, respuesta.mensaje, sizeof(codigo));
+        if (be32toh(codigo) == PROTOCOL_ERROR_OCUPADO)
+            resultado = PUENTE_ERROR_OCUPADO;
+    }
+    red_mensaje_liberar(&respuesta);
+    return resultado;
+}
+
+puente_resultado_t puente_lock_global(puente_t *p, uint32_t lock_id)
+{
+    if (p == NULL || !p->iniciado || lock_id >= PUENTE_MAX_LOCKS)
+        return PUENTE_ERROR_PARAMETROS;
+    if (p->estado->nodo_id == 0) {
+        while (sem_wait(&p->locks_central[lock_id]) != 0) {
+            if (errno != EINTR) return PUENTE_ERROR_RED;
+        }
+        pthread_mutex_lock(&p->mutex_sincronizacion);
+        p->propietario_lock[lock_id] = 0;
+        pthread_mutex_unlock(&p->mutex_sincronizacion);
+        return PUENTE_OK;
+    }
+    uint64_t fin = tiempo_monotonico_ms() + 5000u;
+    for (;;) {
+        puente_resultado_t r = consultar_coordinador(p, LOCK_PEDIDO,
+                                                      LOCK_ACEPTADO, lock_id);
+        if (r != PUENTE_ERROR_OCUPADO) return r;
+        if (tiempo_monotonico_ms() >= fin) return PUENTE_ERROR_OCUPADO;
+        pausa_sincronizacion();
+    }
+}
+
+puente_resultado_t puente_unlock_global(puente_t *p, uint32_t lock_id)
+{
+    if (p == NULL || !p->iniciado || lock_id >= PUENTE_MAX_LOCKS)
+        return PUENTE_ERROR_PARAMETROS;
+    if (p->estado->nodo_id != 0)
+        return consultar_coordinador(p, LOCK_SUELTO, RECIBIDO, lock_id);
+    pthread_mutex_lock(&p->mutex_sincronizacion);
+    int valido = p->propietario_lock[lock_id] == 0;
+    if (valido) {
+        p->propietario_lock[lock_id] = UINT32_MAX;
+        sem_post(&p->locks_central[lock_id]);
+    }
+    pthread_mutex_unlock(&p->mutex_sincronizacion);
+    return valido ? PUENTE_OK : PUENTE_ERROR_PARAMETROS;
+}
+
+puente_resultado_t puente_barrera_global(puente_t *p)
+{
+    if (p == NULL || !p->iniciado) return PUENTE_ERROR_PARAMETROS;
+    uint32_t generacion = p->generacion_local;
+    uint64_t fin = tiempo_monotonico_ms() + 5000u;
+    for (;;) {
+        puente_resultado_t r;
+        if (p->estado->nodo_id == 0) {
+            int listo = registrar_llegada(p, 0, generacion);
+            r = listo > 0 ? PUENTE_OK :
+                (listo == 0 ? PUENTE_ERROR_OCUPADO : PUENTE_ERROR_RESPUESTA);
+        } else {
+            r = consultar_coordinador(p, BLOQUEO_TODOS,
+                                      BLOQUEO_SUELTO, generacion);
+        }
+        if (r == PUENTE_OK) {
+            p->generacion_local++;
+            return PUENTE_OK;
+        }
+        if (r != PUENTE_ERROR_OCUPADO) return r;
+        if (tiempo_monotonico_ms() >= fin) return PUENTE_ERROR_OCUPADO;
+        pausa_sincronizacion();
+    }
 }

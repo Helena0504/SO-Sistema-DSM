@@ -16,6 +16,9 @@
 #include "../red/puente.h"
 
 #include <pthread.h>
+#include <semaphore.h>
+#include <errno.h>
+#include <time.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,11 +45,9 @@ static int pager_instalado = 0;
 static puente_t puente_local = {0};
 static int red_activa = 0;
 
-// Locks locales provisionales
+/* Cada proceso tiene exclusion local y el nodo 0 coordina la global. */
 #define MAX_LOCKS 256
-
-static pthread_mutex_t locks[MAX_LOCKS];
-static pthread_once_t locks_once = PTHREAD_ONCE_INIT;
+static sem_t locks[MAX_LOCKS];
 
 
 
@@ -79,11 +80,23 @@ static void set_error(status_t e)
 
 // LOCKS
 
-static void locks_inicializar(void)
+static int locks_inicializar(void)
 {
-    for (int i = 0; i < MAX_LOCKS; i++) {
-        pthread_mutex_init(&locks[i], NULL);
+    for (int i = 0; i < MAX_LOCKS; ++i) {
+        if (sem_init(&locks[i], 0, 1) != 0) {
+            for (int j = 0; j < i; ++j) sem_destroy(&locks[j]);
+            return -1;
+        }
     }
+    return 0;
+}
+
+static int esperar_semaforo(sem_t *semaforo)
+{
+    while (sem_wait(semaforo) != 0) {
+        if (errno != EINTR) return -1;
+    }
+    return 0;
 }
 
 
@@ -373,8 +386,17 @@ status_t sistema_init(const char *config_path)
         FALLO(convertir_error_stats(resultado_stats));
     }
 
-    // 8. Inicializar locks
-    pthread_once(&locks_once, locks_inicializar);
+    // 8. Inicializar los semaforos locales.
+    if (locks_inicializar() != 0) {
+        stats_liberar();
+        pager_fallos_desinstalar();
+        pager_instalado = 0;
+        nodos_tabla_liberar(&estado_local);
+        asig_tabla_liberar(&estado_local);
+        logs_cerrar();
+        pthread_mutex_unlock(&mutex_api);
+        FALLO(ERROR_MEM);
+    }
 
     // 9. Marcar sistema como inicializado
     initialized = 1;
@@ -653,84 +675,60 @@ status_t sistema_wait_ready(void)
 {
     REQUIERE_INIT();
 
-    dsm_nodo_t nodo_local;
-
-    nodos_resultado_t resultado =
-        nodos_obtener(
-            &estado_local,
-            estado_local.nodo_id,
-            &nodo_local
-        );
-
-    if (resultado != NODOS_OK) {
-        FALLO(convertir_error_nodos(resultado));
+    /* Si hay una lista configurada, deben estar todos sus nodos presentes.
+       Para el modo de pruebas sin lista, basta que el nodo local exista. */
+    for (uint32_t i = 0; i < configuracion.cantidad_nodos; ++i) {
+        dsm_nodo_t nodo;
+        uint32_t id = configuracion.nodos[i].id;
+        if (nodos_obtener(&estado_local, id, &nodo) != NODOS_OK ||
+            nodo.estado != DSM_NODO_CONECTADO) {
+            FALLO(ERROR_NODE);
+        }
     }
-
-    if (nodo_local.estado != DSM_NODO_CONECTADO) {
-        FALLO(ERROR_NODE);
-    }
-
-    set_error(OK);
-
-    return OK;
+    dsm_nodo_t local;
+    if (nodos_obtener(&estado_local, estado_local.nodo_id, &local) != NODOS_OK ||
+        local.estado != DSM_NODO_CONECTADO) FALLO(ERROR_NODE);
+    FALLO(OK);
 }
 
-
-
-// SINCRONIZACION GLOBAL
-
+// BARRERA ENTRE TODOS LOS NODOS CONECTADOS
 status_t sistema_block_all(void)
 {
     REQUIERE_INIT();
-
-    /*
-     * Pendiente:
-     * BLOQUEO_TODOS y BLOQUEO_SUELTO por red.
-     *
-     * No se simula un bloqueo distribuido.
-     */
-
-    FALLO(ERROR_RED);
+    if (sistema_wait_ready() != OK) FALLO(ERROR_NODE);
+    if (!red_activa) {
+        /* Sin red solo existe el proceso local. */
+        FALLO(OK);
+    }
+    FALLO(convertir_error_puente(puente_barrera_global(&puente_local)));
 }
 
-
-
-// LOCK
-
-
+// LOCKS LOCALES Y DISTRIBUIDOS
 status_t sistema_lock(int lock_id)
 {
     REQUIERE_INIT();
-
-    if (lock_id < 0 || lock_id >= MAX_LOCKS) {
-        FALLO(ERROR_ARG);
+    if (lock_id < 0 || lock_id >= MAX_LOCKS) FALLO(ERROR_ARG);
+    if (esperar_semaforo(&locks[lock_id]) != 0) FALLO(ERROR_STATE);
+    if (red_activa) {
+        puente_resultado_t r = puente_lock_global(&puente_local, (uint32_t)lock_id);
+        if (r != PUENTE_OK) {
+            sem_post(&locks[lock_id]);
+            FALLO(convertir_error_puente(r));
+        }
     }
-
-    if (pthread_mutex_lock(&locks[lock_id]) != 0) {
-        FALLO(ERROR_ARG);
-    }
-
-    set_error(OK);
-
-    return OK;
+    FALLO(OK);
 }
-
 
 status_t sistema_unlock(int lock_id)
 {
     REQUIERE_INIT();
-
-    if (lock_id < 0 || lock_id >= MAX_LOCKS) {
-        FALLO(ERROR_ARG);
+    if (lock_id < 0 || lock_id >= MAX_LOCKS) FALLO(ERROR_ARG);
+    if (red_activa) {
+        puente_resultado_t r = puente_unlock_global(&puente_local, (uint32_t)lock_id);
+        if (r != PUENTE_OK) FALLO(convertir_error_puente(r));
     }
-
-    if (pthread_mutex_unlock(&locks[lock_id]) != 0) {
-        FALLO(ERROR_ARG);
-    }
-
-    set_error(OK);
-
-    return OK;
+    if (sem_post(&locks[lock_id]) != 0) FALLO(ERROR_STATE);
+    FALLO(OK);
 }
 
 
@@ -835,7 +833,8 @@ status_t sistema_finalize(void)
         pager_instalado = 0;
     }
 
-    // 2. Liberar modulo de estadisticas
+    // 2. Liberar los semaforos y las estadisticas.
+    for (int i = 0; i < MAX_LOCKS; ++i) sem_destroy(&locks[i]);
     stats_liberar();
 
     // 3. Liberar tabla de nodos
